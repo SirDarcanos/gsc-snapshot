@@ -1,4 +1,13 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -9,6 +18,7 @@ import {
   createSnapshotExecutor,
   type SearchAnalyticsRequest,
   type SearchAnalyticsResponse,
+  type SnapshotFileSystem,
 } from "../src/snapshot.js";
 
 const roots: string[] = [];
@@ -17,9 +27,43 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
+function realFileSystem(): SnapshotFileSystem {
+  return {
+    mkdir: async (directory) => {
+      await mkdir(directory, { recursive: true });
+    },
+    mkdtemp: (prefix) => mkdtemp(prefix),
+    readFile: (filename) => readFile(filename, "utf8"),
+    rename: (source, destination) => rename(source, destination),
+    rm: async (target) => {
+      await rm(target, { recursive: true, force: true });
+    },
+    writeFile: async (filename, contents) => {
+      await writeFile(filename, contents);
+    },
+    exists: async (target) => {
+      try {
+        await stat(target);
+        return true;
+      } catch (error) {
+        if (
+          typeof error === "object" &&
+          error !== null &&
+          "code" in error &&
+          error.code === "ENOENT"
+        ) {
+          return false;
+        }
+        throw error;
+      }
+    },
+  };
+}
+
 async function harness(
   responses: Array<SearchAnalyticsResponse | Error>,
   properties: string[] = [],
+  filesystem?: SnapshotFileSystem,
 ) {
   const root = await mkdtemp(path.join(tmpdir(), "gsc-snapshot-test-"));
   roots.push(root);
@@ -57,9 +101,17 @@ async function harness(
         query,
         now: () => new Date("2026-08-29T12:34:56.000Z"),
         packageIdentity: { name: "gsc-snapshot", version: "0.0.0" },
+        ...(filesystem === undefined ? {} : { filesystem }),
       }),
     },
   };
+}
+
+async function seedPriorSnapshot(root: string): Promise<string> {
+  const target = path.join(root, "2026-07-30--2026-08-28");
+  await mkdir(target);
+  await writeFile(path.join(target, "prior-complete.txt"), "prior snapshot\n");
+  return target;
 }
 
 describe("Search Console property discovery", () => {
@@ -554,6 +606,214 @@ describe("explicit-property Search Console snapshot", () => {
       ).map((request) => request.requestBody.startRow),
     ).toEqual([0, 25_000]);
     expect(await readdir(test.root)).toEqual([]);
+  });
+
+  it("replaces an existing complete snapshot only after its replacement is ready", async () => {
+    const test = await harness([{}, {}, {}, {}, {}]);
+    const snapshotPath = await seedPriorSnapshot(test.root);
+
+    const result = await runCommand(["--site", "sc-domain:example.com"], test.adapter);
+
+    expect(result.exitCode).toBe(0);
+    expect(await readdir(snapshotPath)).toEqual([
+      "countries.json",
+      "devices.json",
+      "manifest.json",
+      "page-query.json",
+      "summary.md",
+      "totals.json",
+    ]);
+    expect(await readdir(test.root)).toEqual(["2026-07-30--2026-08-28"]);
+  });
+
+  it("uses direct replacement without a backup when the filesystem supports it", async () => {
+    const filesystem = realFileSystem();
+    const move = filesystem.rename;
+    const remove = filesystem.rm;
+    let snapshotPath = "";
+    let backupMoves = 0;
+    let backupRemovals = 0;
+    filesystem.rename = async (source, destination) => {
+      if (source === snapshotPath) backupMoves += 1;
+      if (
+        destination === snapshotPath &&
+        path.basename(source).startsWith(".gsc-snapshot-")
+      ) {
+        await remove(snapshotPath);
+        await move(source, destination);
+        return;
+      }
+      await move(source, destination);
+    };
+    filesystem.rm = async (target) => {
+      if (path.basename(target).startsWith(".gsc-snapshot-backup-")) {
+        backupRemovals += 1;
+      }
+      await remove(target);
+    };
+    const test = await harness([{}, {}, {}, {}, {}], [], filesystem);
+    snapshotPath = await seedPriorSnapshot(test.root);
+
+    const result = await runCommand(["--site", "sc-domain:example.com"], test.adapter);
+
+    expect(result.exitCode).toBe(0);
+    expect(backupMoves).toBe(0);
+    expect(backupRemovals).toBe(0);
+    expect(await readdir(snapshotPath)).toHaveLength(6);
+  });
+
+  it("preserves an existing snapshot when writing the replacement fails", async () => {
+    const filesystem = realFileSystem();
+    const write = filesystem.writeFile;
+    filesystem.writeFile = async (filename, contents) => {
+      if (filename.endsWith("summary.md")) throw new Error("injected write failure");
+      await write(filename, contents);
+    };
+    const test = await harness([{}, {}, {}, {}, {}], [], filesystem);
+    const snapshotPath = await seedPriorSnapshot(test.root);
+
+    const result = await runCommand(["--site", "sc-domain:example.com"], test.adapter);
+
+    expect(result).toEqual({
+      exitCode: 1,
+      stdout: "",
+      stderr: "Error: Snapshot publication failed. Check the output path and try again.\n",
+    });
+    expect(await readFile(path.join(snapshotPath, "prior-complete.txt"), "utf8")).toBe(
+      "prior snapshot\n",
+    );
+    expect(await readdir(test.root)).toEqual(["2026-07-30--2026-08-28"]);
+  });
+
+  it("validates the complete replacement before changing an existing snapshot", async () => {
+    const filesystem = realFileSystem();
+    const read = filesystem.readFile;
+    filesystem.readFile = async (filename) => {
+      if (filename.endsWith("manifest.json")) throw new Error("injected validation failure");
+      return read(filename);
+    };
+    const test = await harness([{}, {}, {}, {}, {}], [], filesystem);
+    const snapshotPath = await seedPriorSnapshot(test.root);
+
+    const result = await runCommand(["--site", "sc-domain:example.com"], test.adapter);
+
+    expect(result.exitCode).toBe(1);
+    expect(await readFile(path.join(snapshotPath, "prior-complete.txt"), "utf8")).toBe(
+      "prior snapshot\n",
+    );
+    expect(await readdir(test.root)).toEqual(["2026-07-30--2026-08-28"]);
+  });
+
+  it("preserves the existing snapshot when creating its backup fails", async () => {
+    const filesystem = realFileSystem();
+    const move = filesystem.rename;
+    let snapshotPath = "";
+    filesystem.rename = async (source, destination) => {
+      if (source === snapshotPath) throw new Error("injected backup failure");
+      await move(source, destination);
+    };
+    const test = await harness([{}, {}, {}, {}, {}], [], filesystem);
+    snapshotPath = await seedPriorSnapshot(test.root);
+
+    const result = await runCommand(["--site", "sc-domain:example.com"], test.adapter);
+
+    expect(result.exitCode).toBe(1);
+    expect(await readFile(path.join(snapshotPath, "prior-complete.txt"), "utf8")).toBe(
+      "prior snapshot\n",
+    );
+    expect(await readdir(test.root)).toEqual(["2026-07-30--2026-08-28"]);
+  });
+
+  it("rolls back the prior snapshot when replacement fails after backup", async () => {
+    const filesystem = realFileSystem();
+    const move = filesystem.rename;
+    let snapshotPath = "";
+    filesystem.rename = async (source, destination) => {
+      if (
+        destination === snapshotPath &&
+        path.basename(source).startsWith(".gsc-snapshot-") &&
+        !path.basename(source).startsWith(".gsc-snapshot-backup-")
+      ) {
+        throw new Error("injected replacement failure");
+      }
+      await move(source, destination);
+    };
+    const test = await harness([{}, {}, {}, {}, {}], [], filesystem);
+    snapshotPath = await seedPriorSnapshot(test.root);
+
+    const result = await runCommand(["--site", "sc-domain:example.com"], test.adapter);
+
+    expect(result.exitCode).toBe(1);
+    expect(await readFile(path.join(snapshotPath, "prior-complete.txt"), "utf8")).toBe(
+      "prior snapshot\n",
+    );
+    expect(await readdir(test.root)).toEqual(["2026-07-30--2026-08-28"]);
+  });
+
+  it("keeps the complete replacement when backup cleanup partially fails", async () => {
+    const filesystem = realFileSystem();
+    const remove = filesystem.rm;
+    filesystem.rm = async (target) => {
+      if (path.basename(target).startsWith(".gsc-snapshot-backup-")) {
+        await remove(path.join(target, "prior-complete.txt"));
+        throw new Error("injected partial backup cleanup failure");
+      }
+      await remove(target);
+    };
+    const test = await harness([{}, {}, {}, {}, {}], [], filesystem);
+    const snapshotPath = await seedPriorSnapshot(test.root);
+
+    const result = await runCommand(["--site", "sc-domain:example.com"], test.adapter);
+
+    expect(result.exitCode).toBe(0);
+    expect(await readdir(snapshotPath)).toEqual([
+      "countries.json",
+      "devices.json",
+      "manifest.json",
+      "page-query.json",
+      "summary.md",
+      "totals.json",
+    ]);
+    expect(
+      (await readdir(test.root)).some((entry) =>
+        entry.startsWith(".gsc-snapshot-backup-"),
+      ),
+    ).toBe(true);
+  });
+
+  it("does not hide a publication failure when best-effort cleanup also fails", async () => {
+    const filesystem = realFileSystem();
+    const write = filesystem.writeFile;
+    let cleanupAttempts = 0;
+    filesystem.writeFile = async (filename, contents) => {
+      if (filename.endsWith("summary.md")) throw new Error("primary write failure");
+      await write(filename, contents);
+    };
+    filesystem.rm = async () => {
+      cleanupAttempts += 1;
+      throw new Error("secondary cleanup failure");
+    };
+    const test = await harness([{}, {}, {}, {}, {}], [], filesystem);
+
+    const result = await runCommand(["--site", "sc-domain:example.com"], test.adapter);
+
+    expect(result.stderr).toBe(
+      "Error: Snapshot publication failed. Check the output path and try again.\n",
+    );
+    expect(cleanupAttempts).toBe(1);
+  });
+
+  it("preserves an existing snapshot when a query fails before publication", async () => {
+    const test = await harness([new Error("query failed")]);
+    const snapshotPath = await seedPriorSnapshot(test.root);
+
+    const result = await runCommand(["--site", "sc-domain:example.com"], test.adapter);
+
+    expect(result.exitCode).toBe(1);
+    expect(await readFile(path.join(snapshotPath, "prior-complete.txt"), "utf8")).toBe(
+      "prior snapshot\n",
+    );
+    expect(await readdir(test.root)).toEqual(["2026-07-30--2026-08-28"]);
   });
 
   it("publishes valid empty dataset arrays", async () => {

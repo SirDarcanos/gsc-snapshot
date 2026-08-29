@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { CommandExecution, PreflightPlan } from "./command.js";
@@ -39,13 +40,55 @@ type AuthenticationResult =
   | { ok: true; auth: unknown }
   | { ok: false; reason: "missing" | "rejected" };
 
+export interface SnapshotFileSystem {
+  mkdir(directory: string): Promise<void>;
+  mkdtemp(prefix: string): Promise<string>;
+  readFile(filename: string): Promise<string>;
+  rename(source: string, destination: string): Promise<void>;
+  rm(target: string): Promise<void>;
+  writeFile(filename: string, contents: string): Promise<void>;
+  exists(target: string): Promise<boolean>;
+}
+
 export interface SnapshotServices {
   authenticate(scopes: readonly string[]): Promise<AuthenticationResult>;
   listProperties(auth: unknown): Promise<readonly string[]>;
   query(auth: unknown, request: SearchAnalyticsRequest): Promise<SearchAnalyticsResponse>;
   now(): Date;
   packageIdentity: { name: string; version: string };
+  filesystem?: SnapshotFileSystem;
 }
+
+const nodeFileSystem: SnapshotFileSystem = {
+  mkdir: async (directory) => {
+    await mkdir(directory, { recursive: true });
+  },
+  mkdtemp: (prefix) => mkdtemp(prefix),
+  readFile: (filename) => readFile(filename, "utf8"),
+  rename: (source, destination) => rename(source, destination),
+  rm: async (target) => {
+    await rm(target, { recursive: true, force: true });
+  },
+  writeFile: async (filename, contents) => {
+    await writeFile(filename, contents);
+  },
+  exists: async (target) => {
+    try {
+      await stat(target);
+      return true;
+    } catch (error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        error.code === "ENOENT"
+      ) {
+        return false;
+      }
+      throw error;
+    }
+  },
+};
 
 interface MetricRow {
   clicks: number;
@@ -613,35 +656,84 @@ export function createSnapshotExecutor(
       `${plan.effectiveInterval.start}--${plan.effectiveInterval.end}`,
     );
 
+    const filesystem = services.filesystem ?? nodeFileSystem;
+    const files = new Map<string, string>([
+      ["page-query.json", serialize({ rows: pageQueryRows })],
+      ["devices.json", serialize({ rows: deviceRows })],
+      ["countries.json", serialize({ rows: countryRows })],
+      ["totals.json", serialize({ rows: totalRows })],
+      ["manifest.json", serialize(manifest)],
+      [
+        "summary.md",
+        renderSummary({
+          plan,
+          property,
+          status,
+          firstIncompleteDate,
+          pageQuery: pageQueryRows,
+          devices: deviceRows,
+          countries: countryRows,
+          totals: totalRows,
+          datasets,
+        }),
+      ],
+    ]);
+
     let temporary: string | null = null;
+    let backup: string | null = null;
     try {
-      await mkdir(plan.outputRoot, { recursive: true });
-      temporary = await mkdtemp(path.join(plan.outputRoot, ".gsc-snapshot-"));
-      await Promise.all([
-        writeFile(path.join(temporary, "page-query.json"), serialize({ rows: pageQueryRows })),
-        writeFile(path.join(temporary, "devices.json"), serialize({ rows: deviceRows })),
-        writeFile(path.join(temporary, "countries.json"), serialize({ rows: countryRows })),
-        writeFile(path.join(temporary, "totals.json"), serialize({ rows: totalRows })),
-        writeFile(path.join(temporary, "manifest.json"), serialize(manifest)),
-        writeFile(
-          path.join(temporary, "summary.md"),
-          renderSummary({
-            plan,
-            property,
-            status,
-            firstIncompleteDate,
-            pageQuery: pageQueryRows,
-            devices: deviceRows,
-            countries: countryRows,
-            totals: totalRows,
-            datasets,
-          }),
-        ),
-      ]);
-      await rename(temporary, target);
+      await filesystem.mkdir(plan.outputRoot);
+      temporary = await filesystem.mkdtemp(
+        path.join(plan.outputRoot, ".gsc-snapshot-"),
+      );
+      for (const [filename, contents] of files) {
+        await filesystem.writeFile(path.join(temporary, filename), contents);
+      }
+      for (const [filename, contents] of files) {
+        const written = await filesystem.readFile(path.join(temporary, filename));
+        if (written !== contents) {
+          throw new Error(`Snapshot validation failed for ${filename}`);
+        }
+      }
+
+      const stagedSnapshot = temporary;
+      if (await filesystem.exists(target)) {
+        try {
+          // Use atomic replacement on filesystems that support replacing a directory.
+          await filesystem.rename(stagedSnapshot, target);
+          temporary = null;
+        } catch {
+          backup = path.join(
+            plan.outputRoot,
+            `.gsc-snapshot-backup-${randomUUID()}`,
+          );
+          await filesystem.rename(target, backup);
+          try {
+            await filesystem.rename(stagedSnapshot, target);
+            temporary = null;
+          } catch (error) {
+            try {
+              await filesystem.rename(backup, target);
+              backup = null;
+            } catch {
+              // The prior complete snapshot remains recoverable at the backup path.
+            }
+            throw error;
+          }
+          const priorBackup = backup;
+          await filesystem.rm(priorBackup).catch(async () => {
+            // Cleanup is destructive and cannot safely trigger rollback once begun.
+            await filesystem.rm(priorBackup).catch(() => undefined);
+          });
+          backup = null;
+        }
+      } else {
+        await filesystem.rename(stagedSnapshot, target);
+        temporary = null;
+      }
     } catch {
       if (temporary !== null) {
-        await rm(temporary, { recursive: true, force: true }).catch(() => undefined);
+        await filesystem.rm(temporary).catch(() => undefined);
       }
       throw new SafeDiagnostic(
         "Snapshot publication failed. Check the output path and try again.",
