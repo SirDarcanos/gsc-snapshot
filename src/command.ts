@@ -27,11 +27,15 @@ export interface PreflightPlan {
   adjustments: DateAdjustment[];
 }
 
+export interface CommandExecution {
+  stdout: string;
+}
+
 export interface CommandAdapter {
   cwd: string;
   env: Readonly<Record<string, string | undefined>>;
   now(): Date;
-  execute(plan: PreflightPlan): Promise<void>;
+  execute(plan: PreflightPlan): Promise<CommandExecution | void>;
 }
 
 export interface CommandResult {
@@ -270,8 +274,8 @@ export async function runCommand(
       ...interval,
     };
 
-    await adapter.execute(plan);
-    return { exitCode: 0, stderr: "", stdout: "" };
+    const execution = await adapter.execute(plan);
+    return { exitCode: 0, stderr: "", stdout: execution?.stdout ?? "" };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     return { exitCode: 1, stderr: `Error: ${message}\n`, stdout: "" };
