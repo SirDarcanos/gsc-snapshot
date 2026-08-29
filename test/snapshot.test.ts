@@ -278,6 +278,201 @@ describe("explicit-property Search Console snapshot", () => {
     expect(summary).not.toMatch(/recommend|should|comparison/i);
   });
 
+  it("renders grouped, weighted, escaped, and deterministically ordered summary tables", async () => {
+    const test = await harness([
+      {
+        rows: [
+          {
+            keys: [
+              "https://example.com/a|pipe\nnext",
+              "![*alpha*](https://probe.test/pixel)`code`|beta\nline",
+            ],
+            clicks: 2,
+            impressions: 10,
+            ctr: 0.2,
+            position: 2,
+          },
+          {
+            keys: [
+              "https://example.com/b",
+              "![*alpha*](https://probe.test/pixel)`code`|beta\nline",
+            ],
+            clicks: 3,
+            impressions: 30,
+            ctr: 0.1,
+            position: 4,
+          },
+          {
+            keys: ["https://example.com/a|pipe\nnext", "beta"],
+            clicks: 4,
+            impressions: 40,
+            ctr: 0.1,
+            position: 1,
+          },
+          {
+            keys: ["https://example.com/zero", "zero"],
+            clicks: 0,
+            impressions: 0,
+            ctr: 0,
+            position: 99,
+          },
+        ],
+      },
+      {
+        rows: [
+          { keys: ["MOBILE"], clicks: 5, impressions: 100, ctr: 0.05, position: 3 },
+          { keys: ["DESKTOP"], clicks: 10, impressions: 100, ctr: 0.1, position: 2 },
+          { keys: ["TABLET"], clicks: 0, impressions: 0, ctr: 0, position: 50 },
+        ],
+      },
+      {
+        rows: [
+          { keys: ["usa"], clicks: 2, impressions: 50, ctr: 0.04, position: 4 },
+          { keys: ["can"], clicks: 3, impressions: 50, ctr: 0.06, position: 2 },
+        ],
+      },
+      { rows: [{ clicks: 9, impressions: 80, ctr: 0.1125, position: 2.25 }] },
+      {},
+    ]);
+
+    const result = await runCommand(["--site", "sc-domain:example.com"], test.adapter);
+
+    expect(result.exitCode).toBe(0);
+    const snapshotPath = path.join(test.root, "2026-07-30--2026-08-28");
+    const summary = await readFile(path.join(snapshotPath, "summary.md"), "utf8");
+    expect(summary).toContain("## Top queries");
+    expect(summary).toContain("## Top pages");
+    expect(summary).toContain("## Devices");
+    expect(summary).toContain("## Countries");
+    expect(summary).toContain(
+      "| &#33;&#91;&#42;alpha&#42;&#93;&#40;https&#58;&#47;&#47;probe&#46;test&#47;pixel&#41;&#96;code&#96;&#124;beta<br>line | 5 | 40 | 12.50% | 3.50 |",
+    );
+    expect(summary).toContain(
+      "| https&#58;&#47;&#47;example&#46;com&#47;a&#124;pipe<br>next | 6 | 50 | 12.00% | 1.20 |",
+    );
+    expect(summary).toContain("| zero | 0 | 0 | 0.00% | — |");
+    expect(summary).not.toContain("![*alpha*]");
+    expect(summary).not.toContain("](https://probe.test/pixel)");
+    expect(summary).toContain(
+      "For rows with zero impressions, CTR is 0.00% and average position is —.",
+    );
+    expect(summary.indexOf("| DESKTOP | 10 | 100")).toBeLessThan(
+      summary.indexOf("| MOBILE | 5 | 100"),
+    );
+    expect(summary.indexOf("| can | 3 | 50")).toBeLessThan(
+      summary.indexOf("| usa | 2 | 50"),
+    );
+    expect(summary).toContain(
+      "- start: defaulted-to-29-days-before-yesterday ((omitted) → 2026-07-30)",
+    );
+    expect(summary).toContain(
+      "- end: defaulted-to-yesterday ((omitted) → 2026-08-28)",
+    );
+
+    expect(
+      await readFile(path.join(snapshotPath, "page-query.json"), "utf8"),
+    ).toBe(`${JSON.stringify({
+      rows: [
+        {
+          page: "https://example.com/a|pipe\nnext",
+          query: "![*alpha*](https://probe.test/pixel)`code`|beta\nline",
+          clicks: 2,
+          impressions: 10,
+          ctr: 0.2,
+          position: 2,
+        },
+        {
+          page: "https://example.com/a|pipe\nnext",
+          query: "beta",
+          clicks: 4,
+          impressions: 40,
+          ctr: 0.1,
+          position: 1,
+        },
+        {
+          page: "https://example.com/b",
+          query: "![*alpha*](https://probe.test/pixel)`code`|beta\nline",
+          clicks: 3,
+          impressions: 30,
+          ctr: 0.1,
+          position: 4,
+        },
+        {
+          page: "https://example.com/zero",
+          query: "zero",
+          clicks: 0,
+          impressions: 0,
+          ctr: 0,
+          position: 99,
+        },
+      ],
+    }, null, 2)}\n`);
+  });
+
+  it("limits impression ties lexically and serializes identical inputs byte-for-byte", async () => {
+    const responses = (reverse: boolean) => {
+      const rows = Array.from({ length: 22 }, (_, offset) => {
+        const index = 21 - offset;
+        const suffix = String(index).padStart(2, "0");
+        return {
+          keys: [`https://example.com/p${suffix}`, `q${suffix}`],
+          clicks: 1,
+          impressions: 10,
+          ctr: 0.1,
+          position: index + 1,
+        };
+      });
+      return [
+        { rows: reverse ? rows.reverse() : rows },
+        {},
+        {},
+        { rows: [{ clicks: 22, impressions: 220, ctr: 0.1, position: 11.5 }] },
+        {},
+      ];
+    };
+    const first = await harness(responses(false));
+    const second = await harness(responses(true));
+
+    await runCommand(["--site", "sc-domain:example.com"], first.adapter);
+    await runCommand(["--site", "sc-domain:example.com"], second.adapter);
+
+    const firstPath = path.join(first.root, "2026-07-30--2026-08-28");
+    const secondPath = path.join(second.root, "2026-07-30--2026-08-28");
+    const summary = await readFile(path.join(firstPath, "summary.md"), "utf8");
+    const querySection = summary
+      .split("## Top queries")[1]
+      ?.split("## Top pages")[0] ?? "";
+    const pageSection = summary
+      .split("## Top pages")[1]
+      ?.split("## Devices")[0] ?? "";
+    expect(querySection).toContain("| q00 | 1 | 10 |");
+    expect(querySection).toContain("| q19 | 1 | 10 |");
+    expect(querySection).not.toContain("| q20 |");
+    expect(querySection).not.toContain("| q21 |");
+    expect(querySection.indexOf("| q00 |")).toBeLessThan(
+      querySection.indexOf("| q01 |"),
+    );
+    expect(pageSection).toContain(
+      "| https&#58;&#47;&#47;example&#46;com&#47;p00 | 1 | 10 |",
+    );
+    expect(pageSection).not.toContain(
+      "| https&#58;&#47;&#47;example&#46;com&#47;p20 |",
+    );
+
+    for (const filename of [
+      "page-query.json",
+      "devices.json",
+      "countries.json",
+      "totals.json",
+      "manifest.json",
+      "summary.md",
+    ]) {
+      expect(await readFile(path.join(firstPath, filename), "utf8")).toBe(
+        await readFile(path.join(secondPath, filename), "utf8"),
+      );
+    }
+  });
+
   it("paginates exact page-size boundaries and keeps the earliest completeness date", async () => {
     const firstPage = Array.from({ length: 25_000 }, (_, index) => ({
       keys: [`https://example.com/${index}`, `query-${index}`],
@@ -314,9 +509,15 @@ describe("explicit-property Search Console snapshot", () => {
       query: "query-0",
     });
     expect(dataset.rows[24_999]).toMatchObject({
-      page: "https://example.com/24999",
-      query: "query-24999",
+      page: "https://example.com/9999",
+      query: "query-9999",
     });
+    expect(dataset.rows).toContainEqual(
+      expect.objectContaining({
+        page: "https://example.com/24999",
+        query: "query-24999",
+      }),
+    );
     const manifest = JSON.parse(
       await readFile(path.join(snapshotPath, "manifest.json"), "utf8"),
     );
@@ -363,8 +564,104 @@ describe("explicit-property Search Console snapshot", () => {
     expect(result.exitCode).toBe(0);
     const snapshotPath = path.join(test.root, "2026-07-30--2026-08-28");
     for (const filename of ["page-query.json", "devices.json", "countries.json", "totals.json"]) {
-      expect(JSON.parse(await readFile(path.join(snapshotPath, filename), "utf8"))).toEqual({ rows: [] });
+      const contents = await readFile(path.join(snapshotPath, filename), "utf8");
+      expect(JSON.parse(contents)).toEqual({ rows: [] });
+      expect(contents.endsWith("\n")).toBe(true);
+      expect(contents).not.toMatch(/NaN|Infinity/);
     }
+    const summary = await readFile(path.join(snapshotPath, "summary.md"), "utf8");
+    expect(summary).toContain("| 0 | 0 | 0.00% | — |");
+    expect(summary).not.toMatch(/NaN|Infinity/);
+  });
+
+  it("keeps extreme and non-finite adapter metrics out of serialized output", async () => {
+    const test = await harness([
+      {
+        rows: [
+          {
+            keys: ["https://example.com/extreme-a", "extreme"],
+            clicks: Number.MAX_VALUE,
+            impressions: 1,
+            ctr: Number.MAX_VALUE,
+            position: 1,
+          },
+          {
+            keys: ["https://example.com/extreme-b", "extreme"],
+            clicks: Number.MAX_VALUE,
+            impressions: 1,
+            ctr: Number.MAX_VALUE,
+            position: 1,
+          },
+        ],
+      },
+      {
+        rows: [
+          {
+            keys: ["MOBILE"],
+            clicks: Number.POSITIVE_INFINITY,
+            impressions: Number.NaN,
+            ctr: Number.NEGATIVE_INFINITY,
+            position: Number.NaN,
+          },
+        ],
+      },
+      {},
+      {
+        rows: [
+          {
+            clicks: Number.MAX_VALUE,
+            impressions: 1,
+            ctr: Number.MAX_VALUE,
+            position: 1,
+          },
+          {
+            clicks: Number.MAX_VALUE,
+            impressions: 1,
+            ctr: Number.MAX_VALUE,
+            position: 1,
+          },
+        ],
+      },
+      {},
+    ]);
+
+    await runCommand(["--site", "sc-domain:example.com"], test.adapter);
+
+    const snapshotPath = path.join(test.root, "2026-07-30--2026-08-28");
+    for (const filename of [
+      "page-query.json",
+      "devices.json",
+      "countries.json",
+      "totals.json",
+      "manifest.json",
+      "summary.md",
+    ]) {
+      expect(await readFile(path.join(snapshotPath, filename), "utf8")).not.toMatch(
+        /NaN|Infinity/,
+      );
+    }
+    const summary = await readFile(path.join(snapshotPath, "summary.md"), "utf8");
+    expect(summary).toContain(
+      "| https&#58;&#47;&#47;example&#46;com&#47;extreme&#45;a | 1.7976931348623157e+308 | 1 | 1.80e+310% | 1.00 |",
+    );
+    expect(summary).toContain("| — | 2 | — | 1.00 |");
+    expect(summary).toContain("| extreme | — | 2 | — | 1.00 |");
+    expect(summary).toContain(
+      "Metrics beyond the finite numeric range are shown as —.",
+    );
+    expect(
+      JSON.parse(await readFile(path.join(snapshotPath, "devices.json"), "utf8")),
+    ).toEqual({
+      rows: [
+        {
+          device: "MOBILE",
+          clicks: 0,
+          impressions: 0,
+          ctr: 0,
+          position: 0,
+        },
+      ],
+    });
   });
 
   it("reports partial data from the date-grouped completeness response", async () => {

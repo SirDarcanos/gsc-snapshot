@@ -54,6 +54,26 @@ interface MetricRow {
   position: number;
 }
 
+interface PageQueryMetricRow extends MetricRow {
+  page: string;
+  query: string;
+}
+
+interface DimensionMetricRow extends MetricRow {
+  [dimension: string]: string | number;
+}
+
+interface SummaryMetric {
+  clicks: number | null;
+  impressions: number | null;
+  ctr: number | null;
+  position: number | null;
+}
+
+interface SummaryRow extends SummaryMetric {
+  label: string;
+}
+
 interface DatasetDescriptor {
   filename: string;
   rowCount: number;
@@ -285,15 +305,140 @@ function formatRequested(value: string | null): string {
   return value ?? "(omitted)";
 }
 
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function compareNumber(left: number, right: number): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function compareMetricRows(left: MetricRow, right: MetricRow): number {
+  return (
+    compareNumber(left.clicks, right.clicks) ||
+    compareNumber(left.impressions, right.impressions) ||
+    compareNumber(left.ctr, right.ctr) ||
+    compareNumber(left.position, right.position)
+  );
+}
+
+function aggregateMetrics(rows: readonly MetricRow[]): SummaryMetric {
+  let clicks = 0;
+  let impressions = 0;
+  let weightedPosition = 0;
+  for (const row of rows) {
+    clicks += row.clicks;
+    impressions += row.impressions;
+    weightedPosition += row.position * row.impressions;
+  }
+  const safeClicks = Number.isFinite(clicks) ? clicks : null;
+  const safeImpressions = Number.isFinite(impressions) ? impressions : null;
+  const ctr =
+    safeClicks !== null && safeImpressions !== null
+      ? safeImpressions > 0
+        ? safeClicks / safeImpressions
+        : 0
+      : null;
+  const position =
+    safeImpressions !== null && safeImpressions > 0
+      ? weightedPosition / safeImpressions
+      : null;
+  return {
+    clicks: safeClicks,
+    impressions: safeImpressions,
+    ctr: ctr !== null && Number.isFinite(ctr) ? ctr : null,
+    position:
+      position !== null && Number.isFinite(position) ? position : null,
+  };
+}
+
+function groupMetrics<T extends MetricRow>(
+  rows: readonly T[],
+  label: (row: T) => string,
+): SummaryRow[] {
+  const groups = new Map<string, MetricRow[]>();
+  for (const row of rows) {
+    const key = label(row);
+    const group = groups.get(key);
+    if (group === undefined) groups.set(key, [row]);
+    else group.push(row);
+  }
+  return [...groups]
+    .map(([groupLabel, groupRows]) => ({
+      label: groupLabel,
+      ...aggregateMetrics(groupRows),
+    }))
+    .sort((left, right) => {
+      if (left.impressions === null && right.impressions !== null) return 1;
+      if (left.impressions !== null && right.impressions === null) return -1;
+      if (left.impressions !== null && right.impressions !== null) {
+        const impressionOrder = compareNumber(right.impressions, left.impressions);
+        if (impressionOrder !== 0) return impressionOrder;
+      }
+      return compareText(left.label, right.label);
+    });
+}
+
+function escapeMarkdown(value: string): string {
+  return value
+    .split(/\r\n|\r|\n/)
+    .map((line) =>
+      line.replace(
+        /[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]/g,
+        (character) => `&#${character.codePointAt(0)};`,
+      ),
+    )
+    .join("<br>");
+}
+
+function formatCount(value: number | null): string {
+  if (value === null) return "—";
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
+function formatPercentage(ratio: number | null): string {
+  if (ratio === null) return "—";
+  const percentage = ratio * 100;
+  if (Number.isFinite(percentage)) return `${percentage.toFixed(2)}%`;
+
+  const match = /^(.*)e([+-])(\d+)$/.exec(ratio.toExponential(2));
+  if (match === null) return "—";
+  const exponent = Number(match[3]) + 2;
+  return `${match[1]}e${match[2]}${exponent}%`;
+}
+
+function renderMetricTable(
+  title: string,
+  labelHeading: string,
+  rows: readonly SummaryRow[],
+  limit?: number,
+): string {
+  const selected = limit === undefined ? rows : rows.slice(0, limit);
+  const body = selected
+    .map(
+      (row) =>
+        `| ${escapeMarkdown(row.label)} | ${formatCount(row.clicks)} | ${formatCount(row.impressions)} | ${formatPercentage(row.ctr)} | ${row.position === null ? "—" : row.position.toFixed(2)} |`,
+    )
+    .join("\n");
+  return `## ${title}\n\n| ${labelHeading} | Clicks | Impressions | CTR | Average position |\n| --- | ---: | ---: | ---: | ---: |${body === "" ? "" : `\n${body}`}\n`;
+}
+
 function renderSummary(input: {
   plan: PreflightPlan;
   property: string;
   status: "final" | "partial";
   firstIncompleteDate: string | null;
+  pageQuery: PageQueryMetricRow[];
+  devices: DimensionMetricRow[];
+  countries: DimensionMetricRow[];
   totals: MetricRow[];
   datasets: Record<"pageQuery" | "devices" | "countries" | "totals", DatasetDescriptor>;
 }): string {
-  const total = input.totals[0] ?? { clicks: 0, impressions: 0, ctr: 0, position: 0 };
+  const total = aggregateMetrics(input.totals);
+  const topQueries = groupMetrics(input.pageQuery, (row) => row.query);
+  const topPages = groupMetrics(input.pageQuery, (row) => row.page);
+  const devices = groupMetrics(input.devices, (row) => String(row.device));
+  const countries = groupMetrics(input.countries, (row) => String(row.country));
   const adjustments =
     input.plan.adjustments.length === 0
       ? "None."
@@ -310,7 +455,7 @@ function renderSummary(input: {
 
   return `# Search Console snapshot
 
-**Property:** ${input.property}
+**Property:** ${escapeMarkdown(input.property)}
 **Requested interval:** ${formatRequested(input.plan.requestedInterval.start)} to ${formatRequested(input.plan.requestedInterval.end)}
 **Effective interval:** ${input.plan.effectiveInterval.start} to ${input.plan.effectiveInterval.end}
 **Status:** ${input.status}
@@ -325,8 +470,14 @@ ${adjustments}
 
 | Clicks | Impressions | CTR | Average position |
 | ---: | ---: | ---: | ---: |
-| ${total.clicks} | ${total.impressions} | ${(total.ctr * 100).toFixed(2)}% | ${total.position.toFixed(2)} |
+| ${formatCount(total.clicks)} | ${formatCount(total.impressions)} | ${formatPercentage(total.ctr)} | ${total.position === null ? "—" : total.position.toFixed(2)} |
 
+For rows with zero impressions, CTR is 0.00% and average position is —. Metrics beyond the finite numeric range are shown as —.
+
+${renderMetricTable("Top queries", "Query", topQueries, 20)}
+${renderMetricTable("Top pages", "Page", topPages, 20)}
+${renderMetricTable("Devices", "Device", devices)}
+${renderMetricTable("Countries", "Country", countries)}
 ## Dataset rows
 
 | Dataset | Rows |
@@ -392,20 +543,39 @@ export function createSnapshotExecutor(
       queryView(services, authentication.auth, property, plan, ["date"]),
     ]);
 
-    const pageQueryRows = (pageQueryResponse.rows ?? []).map((row) => ({
-      page: row.keys?.[0] ?? "",
-      query: row.keys?.[1] ?? "",
-      ...metrics(row),
-    }));
-    const deviceRows = (devicesResponse.rows ?? []).map((row) => ({
-      device: row.keys?.[0] ?? "",
-      ...metrics(row),
-    }));
-    const countryRows = (countriesResponse.rows ?? []).map((row) => ({
-      country: row.keys?.[0] ?? "",
-      ...metrics(row),
-    }));
-    const totalRows = (totalsResponse.rows ?? []).map(metrics);
+    const pageQueryRows = (pageQueryResponse.rows ?? [])
+      .map((row) => ({
+        page: row.keys?.[0] ?? "",
+        query: row.keys?.[1] ?? "",
+        ...metrics(row),
+      }))
+      .sort(
+        (left, right) =>
+          compareText(left.page, right.page) ||
+          compareText(left.query, right.query) ||
+          compareMetricRows(left, right),
+      );
+    const deviceRows = (devicesResponse.rows ?? [])
+      .map((row) => ({
+        device: row.keys?.[0] ?? "",
+        ...metrics(row),
+      }))
+      .sort(
+        (left, right) =>
+          compareText(left.device, right.device) || compareMetricRows(left, right),
+      );
+    const countryRows = (countriesResponse.rows ?? [])
+      .map((row) => ({
+        country: row.keys?.[0] ?? "",
+        ...metrics(row),
+      }))
+      .sort(
+        (left, right) =>
+          compareText(left.country, right.country) || compareMetricRows(left, right),
+      );
+    const totalRows = (totalsResponse.rows ?? [])
+      .map(metrics)
+      .sort(compareMetricRows);
     const incompleteDates = [
       pageQueryResponse,
       devicesResponse,
@@ -460,6 +630,9 @@ export function createSnapshotExecutor(
             property,
             status,
             firstIncompleteDate,
+            pageQuery: pageQueryRows,
+            devices: deviceRows,
+            countries: countryRows,
             totals: totalRows,
             datasets,
           }),
