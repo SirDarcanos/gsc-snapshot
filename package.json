@@ -1,0 +1,30 @@
+{
+  "name": "gsc-snapshot",
+  "version": "0.0.0",
+  "description": "Create reproducible, read-only Google Search Console snapshots for humans and agents.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {},
+  "bin": {
+    "gsc-snapshot": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
+  }
+}
