@@ -27,6 +27,18 @@ export function createGoogleServices(): SnapshotServices {
         return { ok: false, reason: isMissingAdc(error) ? "missing" : "rejected" };
       }
     },
+    listProperties: async (auth) => {
+      const client = searchconsole({
+        version: "v1",
+        // See the matching google-auth-library note in query below.
+        auth: auth as never,
+      });
+      const response = await client.sites.list();
+      return (response.data.siteEntry ?? [])
+        .filter((entry) => entry.permissionLevel !== "siteUnverifiedUser")
+        .map((entry) => entry.siteUrl)
+        .filter((siteUrl): siteUrl is string => typeof siteUrl === "string");
+    },
     query: async (auth, request: SearchAnalyticsRequest) => {
       const client = searchconsole({
         version: "v1",

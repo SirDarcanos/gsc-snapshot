@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { CommandExecution, PreflightPlan } from "./command.js";
@@ -38,6 +38,7 @@ type AuthenticationResult =
 
 export interface SnapshotServices {
   authenticate(scopes: readonly string[]): Promise<AuthenticationResult>;
+  listProperties(auth: unknown): Promise<readonly string[]>;
   query(auth: unknown, request: SearchAnalyticsRequest): Promise<SearchAnalyticsResponse>;
   now(): Date;
   packageIdentity: { name: string; version: string };
@@ -176,6 +177,80 @@ async function queryView(
   }
 }
 
+async function homepageHostname(workingRoot: string): Promise<string> {
+  let contents: string;
+  try {
+    contents = await readFile(path.join(workingRoot, "package.json"), "utf8");
+  } catch {
+    throw new SafeDiagnostic(
+      "Cannot discover a Search Console property because package.json is missing or unreadable at the working root. Add a valid homepage or use --site PROPERTY.",
+    );
+  }
+
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(contents);
+  } catch {
+    throw new SafeDiagnostic(
+      "Cannot discover a Search Console property because package.json is invalid. Fix it or use --site PROPERTY.",
+    );
+  }
+  const homepage =
+    typeof manifest === "object" && manifest !== null && "homepage" in manifest
+      ? (manifest as { homepage?: unknown }).homepage
+      : undefined;
+  if (typeof homepage !== "string" || homepage.length === 0) {
+    throw new SafeDiagnostic(
+      "Cannot discover a Search Console property because package.json has no valid homepage. Add an HTTP(S) homepage or use --site PROPERTY.",
+    );
+  }
+
+  try {
+    const url = new URL(homepage);
+    if (
+      (url.protocol !== "http:" && url.protocol !== "https:") ||
+      url.hostname === ""
+    ) {
+      throw new Error("invalid homepage protocol");
+    }
+    return url.hostname;
+  } catch {
+    throw new SafeDiagnostic(
+      "Cannot discover a Search Console property because package.json homepage is not a valid HTTP(S) URL. Fix it or use --site PROPERTY.",
+    );
+  }
+}
+
+function selectProperty(hostname: string, listed: readonly string[]): string {
+  const domainProperty = `sc-domain:${hostname}`;
+  if (listed.includes(domainProperty)) return domainProperty;
+
+  const candidates = [...new Set(listed.filter((property) => {
+    try {
+      const url = new URL(property);
+      return (
+        !/[\u0000-\u001f\u007f]/.test(property) &&
+        url.username === "" &&
+        url.password === "" &&
+        (url.protocol === "http:" || url.protocol === "https:") &&
+        url.hostname === hostname
+      );
+    } catch {
+      return false;
+    }
+  }))].sort((left, right) => left.localeCompare(right));
+
+  if (candidates.length === 1) return candidates[0] as string;
+  if (candidates.length === 0) {
+    throw new SafeDiagnostic(
+      `No accessible Search Console property matches homepage hostname ${hostname}. Rerun with --site PROPERTY.`,
+    );
+  }
+  throw new SafeDiagnostic(
+    `Multiple accessible Search Console properties match homepage hostname ${hostname}:\n${candidates.map((candidate) => `- ${candidate}`).join("\n")}\nRerun with --site PROPERTY.`,
+  );
+}
+
 function serialize(value: unknown): string {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
@@ -243,11 +318,8 @@ export function createSnapshotExecutor(
   services: SnapshotServices,
 ): (plan: PreflightPlan) => Promise<CommandExecution> {
   return async (plan) => {
-    if (plan.site === null) {
-      throw new SafeDiagnostic(
-        "No Search Console property was provided. Rerun with --site PROPERTY.",
-      );
-    }
+    const discoveredHostname =
+      plan.site === null ? await homepageHostname(plan.workingRoot) : null;
 
     let authentication: AuthenticationResult;
     try {
@@ -266,7 +338,19 @@ export function createSnapshotExecutor(
       );
     }
 
-    const property = plan.site;
+    let property: string;
+    if (plan.site !== null) {
+      property = plan.site;
+    } else {
+      let listed: readonly string[];
+      try {
+        listed = await services.listProperties(authentication.auth);
+      } catch (error) {
+        throw searchConsoleDiagnostic(error);
+      }
+      property = selectProperty(discoveredHostname as string, listed);
+    }
+
     const [
       pageQueryResponse,
       devicesResponse,

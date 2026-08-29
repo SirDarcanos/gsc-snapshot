@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -17,11 +17,15 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function harness(responses: SearchAnalyticsResponse[]) {
+async function harness(
+  responses: SearchAnalyticsResponse[],
+  properties: string[] = [],
+) {
   const root = await mkdtemp(path.join(tmpdir(), "gsc-snapshot-test-"));
   roots.push(root);
   const scopes: readonly string[][] = [];
   const requests: SearchAnalyticsRequest[] = [];
+  const listedProperties: string[][] = [];
   const auth = Symbol("private auth");
   const query = vi.fn(async (_auth: unknown, request: SearchAnalyticsRequest) => {
     requests.push(request);
@@ -34,6 +38,7 @@ async function harness(responses: SearchAnalyticsResponse[]) {
     root,
     scopes,
     requests,
+    listedProperties,
     query,
     adapter: {
       cwd: root,
@@ -44,6 +49,10 @@ async function harness(responses: SearchAnalyticsResponse[]) {
           scopes.push(requestedScopes);
           return { ok: true as const, auth };
         },
+        listProperties: async () => {
+          listedProperties.push([...properties]);
+          return properties;
+        },
         query,
         now: () => new Date("2026-08-29T12:34:56.000Z"),
         packageIdentity: { name: "gsc-snapshot", version: "0.0.0" },
@@ -51,6 +60,143 @@ async function harness(responses: SearchAnalyticsResponse[]) {
     },
   };
 }
+
+describe("Search Console property discovery", () => {
+  it("prefers the exact domain property for the project homepage hostname", async () => {
+    const test = await harness(
+      [{}, {}, {}, {}, {}],
+      ["https://example.com/blog/", "sc-domain:example.com"],
+    );
+    await writeFile(
+      path.join(test.root, "package.json"),
+      JSON.stringify({ homepage: "https://Example.COM:8443/products" }),
+    );
+
+    const result = await runCommand([], test.adapter);
+
+    expect(result.exitCode).toBe(0);
+    expect(test.listedProperties).toEqual([
+      ["https://example.com/blog/", "sc-domain:example.com"],
+    ]);
+    expect(test.requests.every((request) => request.siteUrl === "sc-domain:example.com")).toBe(true);
+    expect(result.stdout).toContain("Property: sc-domain:example.com");
+  });
+
+  it("selects one matching URL-prefix property and ignores malformed listings", async () => {
+    const test = await harness(
+      [{}, {}, {}, {}, {}],
+      [
+        "not a property",
+        "ftp://example.com/",
+        "https://user:secret@example.com/",
+        "https://example.com/\ncredential-detail",
+        "https://example.com:9443/docs/",
+        "https://other.test/",
+      ],
+    );
+    await writeFile(
+      path.join(test.root, "package.json"),
+      JSON.stringify({ homepage: "https://EXAMPLE.com/project/page" }),
+    );
+
+    const result = await runCommand([], test.adapter);
+
+    expect(result.exitCode).toBe(0);
+    expect(test.requests.every((request) => request.siteUrl === "https://example.com:9443/docs/")).toBe(true);
+  });
+
+  it("uses npm's active working root for homepage discovery and publication", async () => {
+    const test = await harness(
+      [{}, {}, {}, {}, {}],
+      ["sc-domain:consumer.test"],
+    );
+    const consumerRoot = path.join(test.root, "consumer");
+    await writeFile(
+      path.join(test.root, "placeholder"),
+      "keeps the temporary root present",
+    );
+    await mkdir(consumerRoot);
+    const manifestPath = path.join(consumerRoot, "package.json");
+    await writeFile(
+      manifestPath,
+      JSON.stringify({ homepage: "https://consumer.test/a" }),
+    );
+    test.adapter.env = { npm_package_json: manifestPath };
+
+    const result = await runCommand([], test.adapter);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain(
+      `Path: ${path.join(consumerRoot, "2026-07-30--2026-08-28")}`,
+    );
+  });
+
+  it("lists sorted candidates when URL-prefix discovery is ambiguous", async () => {
+    const test = await harness(
+      [],
+      ["https://example.com/b/", "malformed", "http://example.com/", "https://example.com/a/"],
+    );
+    await writeFile(
+      path.join(test.root, "package.json"),
+      JSON.stringify({ homepage: "https://example.com" }),
+    );
+
+    const result = await runCommand([], test.adapter);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("Multiple accessible Search Console properties");
+    expect(result.stderr).toContain(
+      "- http://example.com/\n- https://example.com/a/\n- https://example.com/b/",
+    );
+    expect(result.stderr).toContain("Rerun with --site PROPERTY");
+    expect(test.query).not.toHaveBeenCalled();
+  });
+
+  it("reports the homepage hostname when no accessible property matches", async () => {
+    const test = await harness([], ["sc-domain:other.test", "bad listing"]);
+    await writeFile(
+      path.join(test.root, "package.json"),
+      JSON.stringify({ homepage: "https://Example.com/path" }),
+    );
+
+    const result = await runCommand([], test.adapter);
+
+    expect(result.stderr).toContain(
+      "No accessible Search Console property matches homepage hostname example.com",
+    );
+    expect(result.stderr).toContain("--site PROPERTY");
+  });
+
+  it.each([
+    ["an absent homepage", {}, "has no valid homepage"],
+    ["a non-string homepage", { homepage: 42 }, "has no valid homepage"],
+    ["a malformed homepage", { homepage: "example.com" }, "not a valid HTTP(S) URL"],
+    ["a non-HTTP homepage", { homepage: "ftp://example.com" }, "not a valid HTTP(S) URL"],
+  ])("rejects $0 with actionable guidance", async (_name, manifest, diagnostic) => {
+    const test = await harness([]);
+    await writeFile(path.join(test.root, "package.json"), JSON.stringify(manifest));
+
+    const result = await runCommand([], test.adapter);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain(diagnostic);
+    expect(result.stderr).toContain("--site PROPERTY");
+    expect(test.scopes).toEqual([]);
+  });
+
+  it("reports missing and malformed package metadata", async () => {
+    const missing = await harness([]);
+    const missingResult = await runCommand([], missing.adapter);
+    expect(missingResult.stderr).toContain("package.json is missing or unreadable");
+
+    const malformed = await harness([]);
+    await writeFile(path.join(malformed.root, "package.json"), "{ nope");
+    const malformedResult = await runCommand([], malformed.adapter);
+    expect(malformedResult.stderr).toContain("package.json is invalid");
+    expect(malformed.scopes).toEqual([]);
+  });
+});
 
 describe("explicit-property Search Console snapshot", () => {
   it("authenticates read-only, requests each web view, and publishes a complete snapshot", async () => {
@@ -74,6 +220,7 @@ describe("explicit-property Search Console snapshot", () => {
       stdout: `Created Search Console snapshot\nInterval: 2026-08-01 to 2026-08-20\nProperty: sc-domain:example.com\nStatus: final\nPath: ${snapshotPath}\n`,
     });
     expect(test.scopes).toEqual([["https://www.googleapis.com/auth/webmasters.readonly"]]);
+    expect(test.listedProperties).toEqual([]);
     expect(test.requests).toEqual([
       expect.objectContaining({ siteUrl: "sc-domain:example.com", requestBody: expect.objectContaining({ dimensions: ["page", "query"], type: "web", dataState: "all" }) }),
       expect.objectContaining({ siteUrl: "sc-domain:example.com", requestBody: expect.objectContaining({ dimensions: ["device"], type: "web", dataState: "all" }) }),
@@ -164,6 +311,7 @@ describe("explicit-property Search Console snapshot", () => {
     const test = await harness([]);
     test.adapter.execute = createSnapshotExecutor({
       authenticate: async () => ({ ok: false as const, reason: "missing" as const }),
+      listProperties: async () => [],
       query: test.query,
       now: () => new Date(),
       packageIdentity: { name: "gsc-snapshot", version: "0.0.0" },
