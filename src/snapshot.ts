@@ -6,6 +6,9 @@ import type { CommandExecution, PreflightPlan } from "./command.js";
 export const WEBMASTERS_READONLY_SCOPE =
   "https://www.googleapis.com/auth/webmasters.readonly";
 
+const SEARCH_CONSOLE_ROW_WARNING =
+  "Search Console may return only top rows; pagination does not guarantee exhaustive data.";
+
 export interface SearchAnalyticsRequest {
   siteUrl: string;
   requestBody: {
@@ -14,7 +17,7 @@ export interface SearchAnalyticsRequest {
     type: "web";
     dataState: "all";
     rowLimit: 25_000;
-    startRow: 0;
+    startRow: number;
     dimensions?: readonly string[];
   };
 }
@@ -160,21 +163,44 @@ async function queryView(
   plan: PreflightPlan,
   dimensions?: readonly string[],
 ): Promise<SearchAnalyticsResponse> {
-  const requestBody: SearchAnalyticsRequest["requestBody"] = {
-    startDate: plan.effectiveInterval.start,
-    endDate: plan.effectiveInterval.end,
-    type: "web",
-    dataState: "all",
-    rowLimit: 25_000,
-    startRow: 0,
-    ...(dimensions === undefined ? {} : { dimensions }),
-  };
+  const rows: SearchAnalyticsRow[] = [];
+  const incompleteDates: string[] = [];
+  let startRow = 0;
 
-  try {
-    return await services.query(auth, { siteUrl, requestBody });
-  } catch (error) {
-    throw searchConsoleDiagnostic(error);
+  while (true) {
+    const requestBody: SearchAnalyticsRequest["requestBody"] = {
+      startDate: plan.effectiveInterval.start,
+      endDate: plan.effectiveInterval.end,
+      type: "web",
+      dataState: "all",
+      rowLimit: 25_000,
+      startRow,
+      ...(dimensions === undefined ? {} : { dimensions }),
+    };
+
+    let response: SearchAnalyticsResponse;
+    try {
+      response = await services.query(auth, { siteUrl, requestBody });
+    } catch (error) {
+      throw searchConsoleDiagnostic(error);
+    }
+
+    const pageRows = response.rows ?? [];
+    rows.push(...pageRows);
+    if (typeof response.metadata?.firstIncompleteDate === "string") {
+      incompleteDates.push(response.metadata.firstIncompleteDate);
+    }
+    if (pageRows.length < requestBody.rowLimit) break;
+    startRow += pageRows.length;
   }
+
+  const firstIncompleteDate = incompleteDates.sort()[0];
+  return {
+    rows,
+    ...(firstIncompleteDate === undefined
+      ? {}
+      : { metadata: { firstIncompleteDate } }),
+  };
 }
 
 async function homepageHostname(workingRoot: string): Promise<string> {
@@ -310,7 +336,7 @@ ${adjustments}
 | countries.json | ${input.datasets.countries.rowCount} |
 | totals.json | ${input.datasets.totals.rowCount} |
 
-Search Console may return only top rows; pagination does not guarantee exhaustive data.
+${SEARCH_CONSOLE_ROW_WARNING}
 `;
 }
 
@@ -406,6 +432,7 @@ export function createSnapshotExecutor(
       adjustments: plan.adjustments,
       pulledAt: services.now().toISOString(),
       requestedDataState: "all",
+      rowAvailability: SEARCH_CONSOLE_ROW_WARNING,
       status,
       firstIncompleteDate,
       package: services.packageIdentity,

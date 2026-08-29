@@ -18,7 +18,7 @@ afterEach(async () => {
 });
 
 async function harness(
-  responses: SearchAnalyticsResponse[],
+  responses: Array<SearchAnalyticsResponse | Error>,
   properties: string[] = [],
 ) {
   const root = await mkdtemp(path.join(tmpdir(), "gsc-snapshot-test-"));
@@ -31,6 +31,7 @@ async function harness(
     requests.push(request);
     const response = responses.shift();
     if (response === undefined) throw new Error("Unexpected Search Console request");
+    if (response instanceof Error) throw response;
     return response;
   });
 
@@ -256,6 +257,8 @@ describe("explicit-property Search Console snapshot", () => {
       adjustments: [],
       pulledAt: "2026-08-29T12:34:56.000Z",
       requestedDataState: "all",
+      rowAvailability:
+        "Search Console may return only top rows; pagination does not guarantee exhaustive data.",
       status: "final",
       firstIncompleteDate: null,
       package: { name: "gsc-snapshot", version: "0.0.0" },
@@ -273,6 +276,83 @@ describe("explicit-property Search Console snapshot", () => {
     expect(summary).toContain("| 2 | 10 | 20.00% | 3.00 |");
     expect(summary).toContain("Search Console may return only top rows; pagination does not guarantee exhaustive data.");
     expect(summary).not.toMatch(/recommend|should|comparison/i);
+  });
+
+  it("paginates exact page-size boundaries and keeps the earliest completeness date", async () => {
+    const firstPage = Array.from({ length: 25_000 }, (_, index) => ({
+      keys: [`https://example.com/${index}`, `query-${index}`],
+      clicks: index,
+      impressions: index + 1,
+      ctr: 0.5,
+      position: 1,
+    }));
+    const test = await harness([
+      { rows: firstPage, metadata: { firstIncompleteDate: "2026-08-27" } },
+      { metadata: { firstIncompleteDate: "2026-08-25" } },
+      {},
+      {},
+      {},
+      { rows: [], metadata: { firstIncompleteDate: "2026-08-26" } },
+    ]);
+
+    const result = await runCommand(["--site", "sc-domain:example.com"], test.adapter);
+
+    expect(result.exitCode).toBe(0);
+    const pageRequests = test.requests.filter(
+      (request) => request.requestBody.dimensions?.join(",") === "page,query",
+    );
+    expect(pageRequests.map((request) => request.requestBody.startRow)).toEqual([
+      0, 25_000,
+    ]);
+    const snapshotPath = path.join(test.root, "2026-07-30--2026-08-28");
+    const dataset = JSON.parse(
+      await readFile(path.join(snapshotPath, "page-query.json"), "utf8"),
+    );
+    expect(dataset.rows).toHaveLength(25_000);
+    expect(dataset.rows[0]).toMatchObject({
+      page: "https://example.com/0",
+      query: "query-0",
+    });
+    expect(dataset.rows[24_999]).toMatchObject({
+      page: "https://example.com/24999",
+      query: "query-24999",
+    });
+    const manifest = JSON.parse(
+      await readFile(path.join(snapshotPath, "manifest.json"), "utf8"),
+    );
+    expect(manifest).toMatchObject({
+      status: "partial",
+      firstIncompleteDate: "2026-08-25",
+      datasets: { pageQuery: { rowCount: 25_000 } },
+    });
+  });
+
+  it("redacts a later-page failure and does not publish a snapshot", async () => {
+    const failure = Object.assign(
+      new Error("token=secret /Users/person/application_default_credentials.json"),
+      { status: 500 },
+    );
+    const test = await harness([
+      { rows: Array(25_000).fill({}) },
+      {},
+      {},
+      {},
+      {},
+      failure,
+    ]);
+
+    const result = await runCommand(["--site", "sc-domain:example.com"], test.adapter);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("Search Console request failed");
+    expect(result.stderr).not.toMatch(/secret|application_default_credentials|\/Users/);
+    expect(
+      test.requests.filter(
+        (request) => request.requestBody.dimensions?.join(",") === "page,query",
+      ).map((request) => request.requestBody.startRow),
+    ).toEqual([0, 25_000]);
+    expect(await readdir(test.root)).toEqual([]);
   });
 
   it("publishes valid empty dataset arrays", async () => {
