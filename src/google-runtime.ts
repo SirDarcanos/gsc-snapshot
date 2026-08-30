@@ -15,7 +15,9 @@ function isMissingAdc(error: unknown): boolean {
   );
 }
 
-export function createGoogleServices(): SnapshotServices {
+export function createGoogleServices(
+  packageIdentity: SnapshotServices["packageIdentity"],
+): SnapshotServices {
   return {
     authenticate: async (scopes) => {
       try {
@@ -64,6 +66,6 @@ export function createGoogleServices(): SnapshotServices {
       return response.data as SearchAnalyticsResponse;
     },
     now: () => new Date(),
-    packageIdentity: { name: "gsc-snapshot", version: "0.0.0" },
+    packageIdentity,
   };
 }

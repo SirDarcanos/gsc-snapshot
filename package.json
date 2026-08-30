@@ -3,6 +3,10 @@
   "version": "0.0.0",
   "description": "Create reproducible, read-only Google Search Console snapshots for humans and agents.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SirDarcanos/gsc-snapshot.git"
+  },
   "type": "module",
   "exports": {},
   "bin": {
@@ -17,6 +21,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "format:check": "node scripts/check-format.mjs",
     "prepack": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
