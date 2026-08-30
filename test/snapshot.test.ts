@@ -64,6 +64,7 @@ async function harness(
   responses: Array<SearchAnalyticsResponse | Error>,
   properties: string[] = [],
   filesystem?: SnapshotFileSystem,
+  pageResponses: Array<SearchAnalyticsResponse | Error> = [{}],
 ) {
   const root = await mkdtemp(path.join(tmpdir(), "gsc-snapshot-test-"));
   roots.push(root);
@@ -73,7 +74,11 @@ async function harness(
   const auth = Symbol("private auth");
   const query = vi.fn(async (_auth: unknown, request: SearchAnalyticsRequest) => {
     requests.push(request);
-    const response = responses.shift();
+    const responsesForView =
+      request.requestBody.dimensions?.join(",") === "page"
+        ? pageResponses
+        : responses;
+    const response = responsesForView.shift();
     if (response === undefined) throw new Error("Unexpected Search Console request");
     if (response instanceof Error) throw response;
     return response;
@@ -259,7 +264,9 @@ describe("explicit-property Search Console snapshot", () => {
       { rows: [{ keys: ["usa"], clicks: 2, impressions: 10, ctr: 0.2, position: 3 }] },
       { rows: [{ clicks: 2, impressions: 10, ctr: 0.2, position: 3 }] },
       { rows: [{ keys: ["2026-08-01"] }] },
-    ]);
+    ], [], undefined, [{
+      rows: [{ keys: ["https://example.com/a"], clicks: 2, impressions: 10, ctr: 0.2, position: 3 }],
+    }]);
 
     const result = await runCommand(
       ["--site", "sc-domain:example.com", "--start", "2026-08-01", "--end", "2026-08-20"],
@@ -276,6 +283,7 @@ describe("explicit-property Search Console snapshot", () => {
     expect(test.listedProperties).toEqual([]);
     expect(test.requests).toEqual([
       expect.objectContaining({ siteUrl: "sc-domain:example.com", requestBody: expect.objectContaining({ dimensions: ["page", "query"], type: "web", dataState: "all" }) }),
+      expect.objectContaining({ siteUrl: "sc-domain:example.com", requestBody: expect.objectContaining({ dimensions: ["page"], type: "web", dataState: "all" }) }),
       expect.objectContaining({ siteUrl: "sc-domain:example.com", requestBody: expect.objectContaining({ dimensions: ["device"], type: "web", dataState: "all" }) }),
       expect.objectContaining({ siteUrl: "sc-domain:example.com", requestBody: expect.objectContaining({ dimensions: ["country"], type: "web", dataState: "all" }) }),
       expect.objectContaining({ siteUrl: "sc-domain:example.com", requestBody: expect.not.objectContaining({ dimensions: expect.anything() }) }),
@@ -296,6 +304,7 @@ describe("explicit-property Search Console snapshot", () => {
       "devices.json",
       "manifest.json",
       "page-query.json",
+      "pages.json",
       "summary.md",
       "totals.json",
     ]);
@@ -316,10 +325,14 @@ describe("explicit-property Search Console snapshot", () => {
       package: { name: "gsc-snapshot", version: "0.0.0" },
       datasets: {
         pageQuery: { filename: "page-query.json", rowCount: 1 },
+        pages: { filename: "pages.json", rowCount: 1 },
         devices: { filename: "devices.json", rowCount: 1 },
         countries: { filename: "countries.json", rowCount: 1 },
         totals: { filename: "totals.json", rowCount: 1 },
       },
+    });
+    expect(JSON.parse(await readFile(path.join(snapshotPath, "pages.json"), "utf8"))).toEqual({
+      rows: [{ page: "https://example.com/a", clicks: 2, impressions: 10, ctr: 0.2, position: 3 }],
     });
     const summary = await readFile(path.join(snapshotPath, "summary.md"), "utf8");
     expect(summary).toContain("# Search Console snapshot");
@@ -385,7 +398,13 @@ describe("explicit-property Search Console snapshot", () => {
       },
       { rows: [{ clicks: 9, impressions: 80, ctr: 0.1125, position: 2.25 }] },
       {},
-    ]);
+    ], [], undefined, [{
+      rows: [
+        { keys: ["https://example.com/a|pipe\nnext"], clicks: 6, impressions: 50, ctr: 0.12, position: 1.2 },
+        { keys: ["https://example.com/b"], clicks: 3, impressions: 30, ctr: 0.1, position: 4 },
+        { keys: ["https://example.com/zero"], clicks: 0, impressions: 0, ctr: 0, position: 99 },
+      ],
+    }]);
 
     const result = await runCommand(["--site", "sc-domain:example.com"], test.adapter);
 
@@ -461,6 +480,41 @@ describe("explicit-property Search Console snapshot", () => {
     }, null, 2)}\n`);
   });
 
+  it("uses page-only performance and reports privacy-suppressed query disclosure", async () => {
+    const test = await harness([
+      {
+        rows: [
+          { keys: ["https://example.com/high", "disclosed query"], clicks: 10, impressions: 16_395, ctr: 10 / 16_395, position: 8 },
+        ],
+      },
+      {},
+      {},
+      { rows: [{ clicks: 268, impressions: 53_804, ctr: 268 / 53_804, position: 6 }] },
+      {},
+    ], [], undefined, [{
+      rows: [
+        { keys: ["https://example.com/high"], clicks: 250, impressions: 40_000, ctr: 0.00625, position: 5 },
+        { keys: ["https://example.com/other"], clicks: 18, impressions: 13_804, ctr: 18 / 13_804, position: 9 },
+      ],
+    }]);
+
+    const result = await runCommand(["--site", "sc-domain:example.com"], test.adapter);
+
+    expect(result.exitCode).toBe(0);
+    const snapshotPath = path.join(test.root, "2026-07-30--2026-08-28");
+    const summary = await readFile(path.join(snapshotPath, "summary.md"), "utf8");
+    const topPages = summary.split("## Top pages")[1]?.split("## Devices")[0] ?? "";
+    expect(topPages).toContain("| https&#58;&#47;&#47;example&#46;com&#47;high | 250 | 40000 | 0.63% | 5.00 |");
+    expect(topPages).not.toContain("| https&#58;&#47;&#47;example&#46;com&#47;high | 10 |");
+    expect(summary).toContain("| Property total | 268 | 53804 |");
+    expect(summary).toContain("| Page-only rows | 268 | 53804 |");
+    expect(summary).toContain("| Page-query rows | 10 | 16395 |");
+    expect(summary).toContain("| Click disclosure | 3.73% |");
+    expect(summary).toContain("| Impression disclosure | 30.47% |");
+    expect(summary).toContain("disclosed subset");
+    expect(summary).toContain("missing page-query clicks do not mean that a page received zero clicks");
+  });
+
   it("limits impression ties lexically and serializes identical inputs byte-for-byte", async () => {
     const responses = (reverse: boolean) => {
       const rows = Array.from({ length: 22 }, (_, offset) => {
@@ -482,8 +536,22 @@ describe("explicit-property Search Console snapshot", () => {
         {},
       ];
     };
-    const first = await harness(responses(false));
-    const second = await harness(responses(true));
+    const pages = (reverse: boolean) => {
+      const rows = Array.from({ length: 22 }, (_, offset) => {
+        const index = 21 - offset;
+        const suffix = String(index).padStart(2, "0");
+        return {
+          keys: [`https://example.com/p${suffix}`],
+          clicks: 1,
+          impressions: 10,
+          ctr: 0.1,
+          position: index + 1,
+        };
+      });
+      return [{ rows: reverse ? rows.reverse() : rows }];
+    };
+    const first = await harness(responses(false), [], undefined, pages(false));
+    const second = await harness(responses(true), [], undefined, pages(true));
 
     await runCommand(["--site", "sc-domain:example.com"], first.adapter);
     await runCommand(["--site", "sc-domain:example.com"], second.adapter);
@@ -513,6 +581,7 @@ describe("explicit-property Search Console snapshot", () => {
 
     for (const filename of [
       "page-query.json",
+      "pages.json",
       "devices.json",
       "countries.json",
       "totals.json",
@@ -580,6 +649,52 @@ describe("explicit-property Search Console snapshot", () => {
     });
   });
 
+  it("paginates the page-only view and retains its partial-data metadata", async () => {
+    const firstPage = Array.from({ length: 25_000 }, (_, index) => ({
+      keys: [`https://example.com/page-${index}`],
+      clicks: index,
+      impressions: index + 1,
+      ctr: index / (index + 1),
+      position: 1,
+    }));
+    const finalRow = {
+      keys: ["https://example.com/final"],
+      clicks: 7,
+      impressions: 8,
+      ctr: 0.875,
+      position: 2,
+    };
+    const test = await harness([{}, {}, {}, {}, {}], [], undefined, [
+      { rows: firstPage, metadata: { firstIncompleteDate: "2026-08-24" } },
+      { rows: [finalRow] },
+    ]);
+
+    const result = await runCommand(["--site", "sc-domain:example.com"], test.adapter);
+
+    expect(result.exitCode).toBe(0);
+    const pageRequests = test.requests.filter(
+      (request) => request.requestBody.dimensions?.join(",") === "page",
+    );
+    expect(pageRequests.map((request) => request.requestBody.startRow)).toEqual([0, 25_000]);
+    expect(pageRequests.every((request) => request.requestBody.dimensions?.length === 1)).toBe(true);
+    const snapshotPath = path.join(test.root, "2026-07-30--2026-08-28");
+    const pages = JSON.parse(await readFile(path.join(snapshotPath, "pages.json"), "utf8"));
+    expect(pages.rows).toHaveLength(25_001);
+    expect(pages.rows).toContainEqual({
+      page: "https://example.com/final",
+      clicks: 7,
+      impressions: 8,
+      ctr: 0.875,
+      position: 2,
+    });
+    const manifest = JSON.parse(await readFile(path.join(snapshotPath, "manifest.json"), "utf8"));
+    expect(manifest).toMatchObject({
+      status: "partial",
+      firstIncompleteDate: "2026-08-24",
+      datasets: { pages: { filename: "pages.json", rowCount: 25_001 } },
+    });
+  });
+
   it("redacts a later-page failure and does not publish a snapshot", async () => {
     const failure = Object.assign(
       new Error("token=secret /Users/person/application_default_credentials.json"),
@@ -620,6 +735,7 @@ describe("explicit-property Search Console snapshot", () => {
       "devices.json",
       "manifest.json",
       "page-query.json",
+      "pages.json",
       "summary.md",
       "totals.json",
     ]);
@@ -659,7 +775,7 @@ describe("explicit-property Search Console snapshot", () => {
     expect(result.exitCode).toBe(0);
     expect(backupMoves).toBe(0);
     expect(backupRemovals).toBe(0);
-    expect(await readdir(snapshotPath)).toHaveLength(6);
+    expect(await readdir(snapshotPath)).toHaveLength(7);
   });
 
   it("preserves an existing snapshot when writing the replacement fails", async () => {
@@ -771,6 +887,7 @@ describe("explicit-property Search Console snapshot", () => {
       "devices.json",
       "manifest.json",
       "page-query.json",
+      "pages.json",
       "summary.md",
       "totals.json",
     ]);
@@ -803,6 +920,63 @@ describe("explicit-property Search Console snapshot", () => {
     expect(cleanupAttempts).toBe(1);
   });
 
+  it("preserves an existing snapshot when the page-only request fails", async () => {
+    const test = await harness([{}, {}, {}, {}, {}], [], undefined, [
+      new Error("page request failed with token=secret"),
+    ]);
+    const snapshotPath = await seedPriorSnapshot(test.root);
+
+    const result = await runCommand(["--site", "sc-domain:example.com"], test.adapter);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Search Console request failed");
+    expect(result.stderr).not.toContain("secret");
+    expect(await readFile(path.join(snapshotPath, "prior-complete.txt"), "utf8")).toBe(
+      "prior snapshot\n",
+    );
+  });
+
+  it("preserves an existing snapshot when Search Console returns malformed page rows", async () => {
+    const test = await harness([{}, {}, {}, {}, {}], [], undefined, [{
+      rows: [{ keys: ["https://example.com/page", "unexpected-second-key"], clicks: 1, impressions: 2, ctr: 0.5, position: 1 }],
+    }]);
+    const snapshotPath = await seedPriorSnapshot(test.root);
+
+    const result = await runCommand(["--site", "sc-domain:example.com"], test.adapter);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Invalid pages dataset");
+    expect(await readFile(path.join(snapshotPath, "prior-complete.txt"), "utf8")).toBe(
+      "prior snapshot\n",
+    );
+  });
+
+  it.each(["missing", "malformed"] as const)(
+    "rejects a %s staged pages.json before replacing a complete snapshot",
+    async (mode) => {
+      const filesystem = realFileSystem();
+      const write = filesystem.writeFile;
+      filesystem.writeFile = async (filename, contents) => {
+        if (filename.endsWith("pages.json")) {
+          if (mode === "malformed") await write(filename, "{ malformed\n");
+          return;
+        }
+        await write(filename, contents);
+      };
+      const test = await harness([{}, {}, {}, {}, {}], [], filesystem);
+      const snapshotPath = await seedPriorSnapshot(test.root);
+
+      const result = await runCommand(["--site", "sc-domain:example.com"], test.adapter);
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Snapshot publication failed");
+      expect(await readFile(path.join(snapshotPath, "prior-complete.txt"), "utf8")).toBe(
+        "prior snapshot\n",
+      );
+      expect(await readdir(test.root)).toEqual(["2026-07-30--2026-08-28"]);
+    },
+  );
+
   it("preserves an existing snapshot when a query fails before publication", async () => {
     const test = await harness([new Error("query failed")]);
     const snapshotPath = await seedPriorSnapshot(test.root);
@@ -823,7 +997,7 @@ describe("explicit-property Search Console snapshot", () => {
 
     expect(result.exitCode).toBe(0);
     const snapshotPath = path.join(test.root, "2026-07-30--2026-08-28");
-    for (const filename of ["page-query.json", "devices.json", "countries.json", "totals.json"]) {
+    for (const filename of ["page-query.json", "pages.json", "devices.json", "countries.json", "totals.json"]) {
       const contents = await readFile(path.join(snapshotPath, filename), "utf8");
       expect(JSON.parse(contents)).toEqual({ rows: [] });
       expect(contents.endsWith("\n")).toBe(true);
@@ -831,6 +1005,8 @@ describe("explicit-property Search Console snapshot", () => {
     }
     const summary = await readFile(path.join(snapshotPath, "summary.md"), "utf8");
     expect(summary).toContain("| 0 | 0 | 0.00% | — |");
+    expect(summary).toContain("| Click disclosure | Not available (page-only clicks denominator is zero) |");
+    expect(summary).toContain("| Impression disclosure | Not available (page-only impressions denominator is zero) |");
     expect(summary).not.toMatch(/NaN|Infinity/);
   });
 
@@ -883,13 +1059,19 @@ describe("explicit-property Search Console snapshot", () => {
         ],
       },
       {},
-    ]);
+    ], [], undefined, [{
+      rows: [
+        { keys: ["https://example.com/extreme-a"], clicks: Number.MAX_VALUE, impressions: 1, ctr: Number.MAX_VALUE, position: 1 },
+        { keys: ["https://example.com/extreme-b"], clicks: Number.MAX_VALUE, impressions: 1, ctr: Number.MAX_VALUE, position: 1 },
+      ],
+    }]);
 
     await runCommand(["--site", "sc-domain:example.com"], test.adapter);
 
     const snapshotPath = path.join(test.root, "2026-07-30--2026-08-28");
     for (const filename of [
       "page-query.json",
+      "pages.json",
       "devices.json",
       "countries.json",
       "totals.json",

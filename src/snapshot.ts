@@ -10,6 +10,8 @@ import {
 
 export const WEBMASTERS_READONLY_SCOPE =
   "https://www.googleapis.com/auth/webmasters.readonly";
+const ADC_SETUP_SCOPES =
+  "https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/webmasters.readonly";
 
 export interface SearchAnalyticsRequest {
   siteUrl: string;
@@ -305,7 +307,7 @@ export function createSnapshotExecutor(
     if (!authentication.ok) {
       if (authentication.reason === "missing") {
         throw new SafeDiagnostic(
-          `Application Default Credentials were not found. Set them up with \`gcloud auth application-default login --scopes=${WEBMASTERS_READONLY_SCOPE}\` and try again.`,
+          `Application Default Credentials were not found. Set them up with \`gcloud auth application-default login --scopes=${ADC_SETUP_SCOPES}\` and try again.`,
         );
       }
       throw new SafeDiagnostic(
@@ -328,12 +330,14 @@ export function createSnapshotExecutor(
 
     const [
       pageQueryResponse,
+      pagesResponse,
       devicesResponse,
       countriesResponse,
       totalsResponse,
       completenessResponse,
     ] = await Promise.all([
       queryView(services, authentication.auth, property, plan, ["page", "query"]),
+      queryView(services, authentication.auth, property, plan, ["page"]),
       queryView(services, authentication.auth, property, plan, ["device"]),
       queryView(services, authentication.auth, property, plan, ["country"]),
       queryView(services, authentication.auth, property, plan),
@@ -352,6 +356,7 @@ export function createSnapshotExecutor(
       },
       pulls: {
         pageQuery: pageQueryResponse,
+        pages: pagesResponse,
         devices: devicesResponse,
         countries: countriesResponse,
         totals: totalsResponse,
@@ -382,6 +387,27 @@ export function createSnapshotExecutor(
         const written = await filesystem.readFile(path.join(temporary, filename));
         if (written !== contents) {
           throw new Error(`Snapshot validation failed for ${filename}`);
+        }
+        if (filename === "pages.json") {
+          const parsed = JSON.parse(written) as { rows?: unknown };
+          if (
+            typeof parsed !== "object" ||
+            parsed === null ||
+            !Array.isArray(parsed.rows) ||
+            parsed.rows.some(
+              (row) =>
+                typeof row !== "object" ||
+                row === null ||
+                typeof (row as { page?: unknown }).page !== "string" ||
+                ["clicks", "impressions", "ctr", "position"].some(
+                  (field) =>
+                    typeof (row as Record<string, unknown>)[field] !== "number" ||
+                    !Number.isFinite((row as Record<string, number>)[field]),
+                ),
+            )
+          ) {
+            throw new Error("Snapshot validation failed for pages.json");
+          }
         }
       }
 

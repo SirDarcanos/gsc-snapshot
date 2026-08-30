@@ -17,6 +17,19 @@ export function createGoogleServices(packageIdentity) {
           ],
         };
       }
+      if (dimensions === "page") {
+        return {
+          rows: [
+            {
+              keys: ["https://example.com/"],
+              clicks: 2,
+              impressions: 10,
+              ctr: 0.2,
+              position: 3,
+            },
+          ],
+        };
+      }
       if (dimensions === "device") {
         return {
           rows: [

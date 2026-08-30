@@ -14,15 +14,15 @@
 Pin the package as a development dependency in the project whose Search Console data you want to capture:
 
 ```sh
-npm install --save-dev --save-exact gsc-snapshot@0.1.0
+npm install --save-dev --save-exact gsc-snapshot@0.2.0
 ```
 
-Replace `0.1.0` with the release you intend to use. Add a project-local script:
+Replace `0.2.0` with the release you intend to use. Add a project-local script:
 
 ```json
 {
   "devDependencies": {
-    "gsc-snapshot": "0.1.0"
+    "gsc-snapshot": "0.2.0"
   },
   "scripts": {
     "search-console:snapshot": "gsc-snapshot --output reports/search-console"
@@ -44,12 +44,14 @@ A human with access to the relevant Google Cloud project and Search Console prop
 
 1. Enable the Search Console API in the Google Cloud project that will provide quota.
 2. [Install the Google Cloud CLI](https://docs.cloud.google.com/sdk/docs/install-sdk), then initialize it.
-3. Create user-level ADC with the read-only scope:
+3. Create user-level ADC with the required scopes:
 
    ```sh
    gcloud auth application-default login \
-     --scopes=https://www.googleapis.com/auth/webmasters.readonly
+     --scopes=https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/webmasters.readonly
    ```
+
+   `webmasters.readonly` remains the Search Console permission. Current `gcloud` versions also require `cloud-platform` for ADC quota-project handling; the snapshot runtime still requests only the Search Console read-only scope.
 
 4. Confirm that the authenticated user can access the intended Search Console property.
 
@@ -108,18 +110,20 @@ reports/search-console/
     ├── devices.json
     ├── manifest.json
     ├── page-query.json
+    ├── pages.json
     ├── summary.md
     └── totals.json
 ```
 
 The JSON datasets contain stable `rows` arrays:
 
-- `page-query.json`: page, query, clicks, impressions, CTR, and position
+- `page-query.json`: page, query, clicks, impressions, CTR, and position for disclosed query-bearing rows
+- `pages.json`: page, clicks, impressions, CTR, and position from an independent page-only request
 - `devices.json`: device and metrics
 - `countries.json`: country and metrics
 - `totals.json`: whole-interval metrics
 
-`manifest.json` records the property, intervals, adjustments, UTC pull time, requested data state, package version, completeness, fixed dataset names, and row counts. `summary.md` presents the same provenance with totals, the top 20 queries and pages by impressions, device and country totals, and the Search Console row-availability limitation.
+`manifest.json` records the property, intervals, adjustments, UTC pull time, requested data state, package version, completeness, fixed dataset names, and row counts. `summary.md` presents the same provenance with totals, the top 20 queries and pages by impressions, device and country totals, query disclosure percentages, and the Search Console row-availability limitation. Top pages come from `pages.json`, not from aggregating query-bearing rows.
 
 The command writes and validates a temporary sibling directory before changing the interval directory. A failed pull leaves the previous complete interval in place when recovery is possible.
 
@@ -130,7 +134,7 @@ The command requests Search Console's `all` data state so recent source data and
 - `final`: Search Console did not report an incomplete date.
 - `partial`: Search Console reported provisional data. The manifest records the earliest `firstIncompleteDate`, and the summary displays it as a warning.
 
-Search Console may return only top rows. Pagination retrieves every row the Search Analytics API makes available, but it cannot guarantee exhaustive source data.
+Search Console may return only top rows. Pagination retrieves every row the Search Analytics API makes available, but it cannot guarantee exhaustive source data. Search Console can also suppress query-bearing rows for privacy, so `page-query.json` is a disclosed subset for query research rather than complete page performance. Use `pages.json` for page clicks, CTR, position, and top-page analysis.
 
 ## Security properties
 

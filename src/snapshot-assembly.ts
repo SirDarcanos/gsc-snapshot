@@ -38,6 +38,7 @@ export interface SnapshotAssemblyInput {
   provenance: SnapshotProvenance;
   pulls: {
     pageQuery: CompletedSnapshotPull;
+    pages: CompletedSnapshotPull;
     devices: CompletedSnapshotPull;
     countries: CompletedSnapshotPull;
     totals: CompletedSnapshotPull;
@@ -47,6 +48,7 @@ export interface SnapshotAssemblyInput {
 
 export type SnapshotFilename =
   | "page-query.json"
+  | "pages.json"
   | "devices.json"
   | "countries.json"
   | "totals.json"
@@ -60,6 +62,7 @@ export interface SnapshotFile<Name extends SnapshotFilename = SnapshotFilename> 
 
 export type SnapshotFiles = readonly [
   SnapshotFile<"page-query.json">,
+  SnapshotFile<"pages.json">,
   SnapshotFile<"devices.json">,
   SnapshotFile<"countries.json">,
   SnapshotFile<"totals.json">,
@@ -84,13 +87,20 @@ interface PageQueryMetricRow extends MetricRow {
   query: string;
 }
 
+interface PageMetricRow extends MetricRow {
+  page: string;
+}
+
 interface DimensionMetricRow extends MetricRow {
   [dimension: string]: string | number;
 }
 
-interface SummaryMetric {
+interface MetricCounts {
   clicks: number | null;
   impressions: number | null;
+}
+
+interface SummaryMetric extends MetricCounts {
   ctr: number | null;
   position: number | null;
 }
@@ -118,6 +128,19 @@ function metrics(row: SnapshotSourceRow): MetricRow {
   };
 }
 
+function pageMetrics(row: SnapshotSourceRow): PageMetricRow {
+  const page = row.keys?.[0];
+  const values = [row.clicks, row.impressions, row.ctr, row.position];
+  if (
+    row.keys?.length !== 1 ||
+    typeof page !== "string" ||
+    values.some((value) => typeof value !== "number" || !Number.isFinite(value))
+  ) {
+    throw new Error("Invalid pages dataset returned by Search Console");
+  }
+  return { page, ...metrics(row) };
+}
+
 function serialize(value: unknown): string {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
@@ -141,6 +164,19 @@ function compareMetricRows(left: MetricRow, right: MetricRow): number {
     compareNumber(left.ctr, right.ctr) ||
     compareNumber(left.position, right.position)
   );
+}
+
+function sumMetricCounts(rows: readonly MetricRow[]): MetricCounts {
+  let clicks = 0;
+  let impressions = 0;
+  for (const row of rows) {
+    clicks += row.clicks;
+    impressions += row.impressions;
+  }
+  return {
+    clicks: Number.isFinite(clicks) ? clicks : null,
+    impressions: Number.isFinite(impressions) ? impressions : null,
+  };
 }
 
 function aggregateMetrics(rows: readonly MetricRow[]): SummaryMetric {
@@ -173,6 +209,18 @@ function aggregateMetrics(rows: readonly MetricRow[]): SummaryMetric {
   };
 }
 
+function orderSummaryRows(rows: SummaryRow[]): SummaryRow[] {
+  return rows.sort((left, right) => {
+    if (left.impressions === null && right.impressions !== null) return 1;
+    if (left.impressions !== null && right.impressions === null) return -1;
+    if (left.impressions !== null && right.impressions !== null) {
+      const impressionOrder = compareNumber(right.impressions, left.impressions);
+      if (impressionOrder !== 0) return impressionOrder;
+    }
+    return compareText(left.label, right.label);
+  });
+}
+
 function groupMetrics<T extends MetricRow>(
   rows: readonly T[],
   label: (row: T) => string,
@@ -184,20 +232,24 @@ function groupMetrics<T extends MetricRow>(
     if (group === undefined) groups.set(key, [row]);
     else group.push(row);
   }
-  return [...groups]
-    .map(([groupLabel, groupRows]) => ({
+  return orderSummaryRows(
+    [...groups].map(([groupLabel, groupRows]) => ({
       label: groupLabel,
       ...aggregateMetrics(groupRows),
-    }))
-    .sort((left, right) => {
-      if (left.impressions === null && right.impressions !== null) return 1;
-      if (left.impressions !== null && right.impressions === null) return -1;
-      if (left.impressions !== null && right.impressions !== null) {
-        const impressionOrder = compareNumber(right.impressions, left.impressions);
-        if (impressionOrder !== 0) return impressionOrder;
-      }
-      return compareText(left.label, right.label);
-    });
+    })),
+  );
+}
+
+function summarizePages(rows: readonly PageMetricRow[]): SummaryRow[] {
+  return orderSummaryRows(
+    rows.map((row) => ({
+      label: row.page,
+      clicks: row.clicks,
+      impressions: row.impressions,
+      ctr: row.ctr,
+      position: row.position,
+    })),
+  );
 }
 
 function escapeMarkdown(value: string): string {
@@ -244,19 +296,29 @@ function renderMetricTable(
   return `## ${title}\n\n| ${labelHeading} | Clicks | Impressions | CTR | Average position |\n| --- | ---: | ---: | ---: | ---: |${body === "" ? "" : `\n${body}`}\n`;
 }
 
+function renderDisclosureRatio(numerator: number | null, denominator: number | null, metric: string): string {
+  if (numerator === null || denominator === null) return "—";
+  if (denominator === 0) return `Not available (${metric} denominator is zero)`;
+  return formatPercentage(numerator / denominator);
+}
+
 function renderSummary(input: {
   provenance: SnapshotProvenance;
   status: "final" | "partial";
   firstIncompleteDate: string | null;
   pageQuery: PageQueryMetricRow[];
+  pages: PageMetricRow[];
   devices: DimensionMetricRow[];
   countries: DimensionMetricRow[];
   totals: MetricRow[];
-  datasets: Record<"pageQuery" | "devices" | "countries" | "totals", DatasetDescriptor>;
+  datasets: Record<"pageQuery" | "pages" | "devices" | "countries" | "totals", DatasetDescriptor>;
 }): string {
   const total = aggregateMetrics(input.totals);
+  const propertyCounts = sumMetricCounts(input.totals);
+  const pageOnlyCounts = sumMetricCounts(input.pages);
+  const pageQueryCounts = sumMetricCounts(input.pageQuery);
   const topQueries = groupMetrics(input.pageQuery, (row) => row.query);
-  const topPages = groupMetrics(input.pageQuery, (row) => row.page);
+  const topPages = summarizePages(input.pages);
   const devices = groupMetrics(input.devices, (row) => String(row.device));
   const countries = groupMetrics(input.countries, (row) => String(row.country));
   const adjustments =
@@ -294,6 +356,23 @@ ${adjustments}
 
 For rows with zero impressions, CTR is 0.00% and average position is —. Metrics beyond the finite numeric range are shown as —.
 
+## Query disclosure and page completeness
+
+Search Console can suppress query-bearing rows for privacy. \`page-query.json\` is a disclosed subset for query research, not a complete account of page performance. Page clicks, page CTR, top pages, and page-level metrics come from the independent page-only dataset in \`pages.json\`; missing page-query clicks do not mean that a page received zero clicks.
+
+| Measure | Clicks | Impressions |
+| --- | ---: | ---: |
+| Property total | ${formatCount(propertyCounts.clicks)} | ${formatCount(propertyCounts.impressions)} |
+| Page-only rows | ${formatCount(pageOnlyCounts.clicks)} | ${formatCount(pageOnlyCounts.impressions)} |
+| Page-query rows | ${formatCount(pageQueryCounts.clicks)} | ${formatCount(pageQueryCounts.impressions)} |
+
+| Page-query disclosure relative to page-only rows | Value |
+| --- | ---: |
+| Click disclosure | ${renderDisclosureRatio(pageQueryCounts.clicks, pageOnlyCounts.clicks, "page-only clicks")} |
+| Impression disclosure | ${renderDisclosureRatio(pageQueryCounts.impressions, pageOnlyCounts.impressions, "page-only impressions")} |
+
+Disclosure totals use sums of clicks and impressions. CTR and position are not averaged across rows.
+
 ${renderMetricTable("Top queries", "Query", topQueries, 20)}
 ${renderMetricTable("Top pages", "Page", topPages, 20)}
 ${renderMetricTable("Devices", "Device", devices)}
@@ -303,6 +382,7 @@ ${renderMetricTable("Countries", "Country", countries)}
 | Dataset | Rows |
 | --- | ---: |
 | page-query.json | ${input.datasets.pageQuery.rowCount} |
+| pages.json | ${input.datasets.pages.rowCount} |
 | devices.json | ${input.datasets.devices.rowCount} |
 | countries.json | ${input.datasets.countries.rowCount} |
 | totals.json | ${input.datasets.totals.rowCount} |
@@ -323,6 +403,12 @@ export function assembleSnapshot(input: SnapshotAssemblyInput): AssembledSnapsho
         compareText(left.page, right.page) ||
         compareText(left.query, right.query) ||
         compareMetricRows(left, right),
+    );
+  const pageRows = input.pulls.pages.rows
+    .map(pageMetrics)
+    .sort(
+      (left, right) =>
+        compareText(left.page, right.page) || compareMetricRows(left, right),
     );
   const deviceRows = input.pulls.devices.rows
     .map((row) => ({
@@ -345,6 +431,7 @@ export function assembleSnapshot(input: SnapshotAssemblyInput): AssembledSnapsho
   const totalRows = input.pulls.totals.rows.map(metrics).sort(compareMetricRows);
   const firstIncompleteDate = [
     ...input.pulls.pageQuery.reportedIncompleteDates,
+    ...input.pulls.pages.reportedIncompleteDates,
     ...input.pulls.devices.reportedIncompleteDates,
     ...input.pulls.countries.reportedIncompleteDates,
     ...input.pulls.totals.reportedIncompleteDates,
@@ -353,6 +440,7 @@ export function assembleSnapshot(input: SnapshotAssemblyInput): AssembledSnapsho
   const status = firstIncompleteDate === null ? "final" : "partial";
   const datasets = {
     pageQuery: { filename: "page-query.json", rowCount: pageQueryRows.length },
+    pages: { filename: "pages.json", rowCount: pageRows.length },
     devices: { filename: "devices.json", rowCount: deviceRows.length },
     countries: { filename: "countries.json", rowCount: countryRows.length },
     totals: { filename: "totals.json", rowCount: totalRows.length },
@@ -376,6 +464,7 @@ export function assembleSnapshot(input: SnapshotAssemblyInput): AssembledSnapsho
     status,
     files: [
       { filename: "page-query.json", contents: serialize({ rows: pageQueryRows }) },
+      { filename: "pages.json", contents: serialize({ rows: pageRows }) },
       { filename: "devices.json", contents: serialize({ rows: deviceRows }) },
       { filename: "countries.json", contents: serialize({ rows: countryRows }) },
       { filename: "totals.json", contents: serialize({ rows: totalRows }) },
@@ -387,6 +476,7 @@ export function assembleSnapshot(input: SnapshotAssemblyInput): AssembledSnapsho
           status,
           firstIncompleteDate,
           pageQuery: pageQueryRows,
+          pages: pageRows,
           devices: deviceRows,
           countries: countryRows,
           totals: totalRows,

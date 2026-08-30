@@ -123,7 +123,7 @@ describe("installed gsc-snapshot executable", () => {
     );
     expect(manifest).toMatchObject({
       property: "sc-domain:example.com",
-      package: { name: "gsc-snapshot", version: "0.1.0" },
+      package: { name: "gsc-snapshot", version: "0.2.0" },
       status: "final",
     });
   });

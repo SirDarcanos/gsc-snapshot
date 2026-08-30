@@ -71,6 +71,24 @@ function input(reverse = false): SnapshotAssemblyInput {
         ]),
         order(["2026-08-27"]),
       ),
+      pages: pull(
+        order([
+          {
+            keys: ["https://example.com/b"],
+            clicks: 2,
+            impressions: 30,
+            ctr: 2 / 30,
+            position: 5,
+          },
+          {
+            keys: ["https://example.com/a|pipe\nnext"],
+            clicks: 7,
+            impressions: 50,
+            ctr: 0.14,
+            position: 1.5,
+          },
+        ]),
+      ),
       devices: pull(
         order([
           {
@@ -123,6 +141,7 @@ describe("deterministic Snapshot assembly", () => {
     expect(snapshot.status).toBe("partial");
     expect(snapshot.files.map(({ filename }) => filename)).toEqual([
       "page-query.json",
+      "pages.json",
       "devices.json",
       "countries.json",
       "totals.json",

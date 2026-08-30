@@ -29,7 +29,7 @@ Google Cloud setup belongs to each person who runs `gsc-snapshot`. It has no rol
 3. Update `version` in both `package.json` and `package-lock.json` without creating a tag:
 
    ```sh
-   npm version 0.1.0 --no-git-tag-version
+   npm version 0.2.0 --no-git-tag-version
    ```
 
 4. Run the same checks as CI:
@@ -52,8 +52,8 @@ Google Cloud setup belongs to each person who runs `gsc-snapshot`. It has no rol
 Create an annotated tag whose value exactly matches `package.json#version`, then push that tag:
 
 ```sh
-git tag -a v0.1.0 -m "Release v0.1.0"
-git push origin v0.1.0
+git tag -a v0.2.0 -m "Release v0.2.0"
+git push origin v0.2.0
 ```
 
 `.github/workflows/release.yml` runs only for tags matching `v*.*.*`. Before publishing, it installs from `package-lock.json`, checks formatting, type-checks, runs all tests, and performs a package dry run. It then rejects a tag that differs from the package version or still uses `0.0.0`.

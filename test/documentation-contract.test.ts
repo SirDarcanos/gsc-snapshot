@@ -19,12 +19,15 @@ describe("user documentation contract", () => {
       "America/Los_Angeles",
       "## Output",
       "manifest.json",
+      "page-query.json",
+      "pages.json",
       "summary.md",
       "## Partial and final data",
       "firstIncompleteDate",
       "## Security properties",
-      '"gsc-snapshot": "0.1.0"',
+      '"gsc-snapshot": "0.2.0"',
       '"search-console:snapshot"',
+      "https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/webmasters.readonly",
     ]) {
       expect(readme).toContain(required);
     }

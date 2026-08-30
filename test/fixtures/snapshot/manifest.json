@@ -37,6 +37,10 @@
       "filename": "page-query.json",
       "rowCount": 3
     },
+    "pages": {
+      "filename": "pages.json",
+      "rowCount": 2
+    },
     "devices": {
       "filename": "devices.json",
       "rowCount": 2
