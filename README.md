@@ -43,7 +43,7 @@ When npm runs the command, `gsc-snapshot` uses the directory containing the cons
 A human with access to the relevant Google Cloud project and Search Console property must complete this setup. The command does not install `gcloud`, enable APIs, create cloud projects, or start an OAuth flow.
 
 1. Enable the Search Console API in the Google Cloud project that will provide quota.
-2. Install and initialize the Google Cloud CLI.
+2. [Install the Google Cloud CLI](https://docs.cloud.google.com/sdk/docs/install-sdk), then initialize it.
 3. Create user-level ADC with the read-only scope:
 
    ```sh
