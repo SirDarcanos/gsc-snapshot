@@ -1,0 +1,18 @@
+{
+  "rows": [
+    {
+      "country": "can",
+      "clicks": 3,
+      "impressions": 50,
+      "ctr": 0.06,
+      "position": 2
+    },
+    {
+      "country": "usa",
+      "clicks": 2,
+      "impressions": 50,
+      "ctr": 0.04,
+      "position": 4
+    }
+  ]
+}

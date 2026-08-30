@@ -1,0 +1,28 @@
+{
+  "rows": [
+    {
+      "page": "",
+      "query": "",
+      "clicks": 0,
+      "impressions": 0,
+      "ctr": 0,
+      "position": 0
+    },
+    {
+      "page": "https://example.com/a|pipe\nnext",
+      "query": "alpha",
+      "clicks": 2,
+      "impressions": 10,
+      "ctr": 0.2,
+      "position": 2
+    },
+    {
+      "page": "https://example.com/b",
+      "query": "alpha",
+      "clicks": 3,
+      "impressions": 30,
+      "ctr": 0.1,
+      "position": 4
+    }
+  ]
+}

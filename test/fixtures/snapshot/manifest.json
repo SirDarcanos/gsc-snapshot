@@ -1,0 +1,53 @@
+{
+  "property": "sc-domain:example.com",
+  "searchType": "web",
+  "requestedInterval": {
+    "start": null,
+    "end": null
+  },
+  "effectiveInterval": {
+    "start": "2026-07-30",
+    "end": "2026-08-28"
+  },
+  "adjustments": [
+    {
+      "field": "start",
+      "reason": "defaulted-to-29-days-before-yesterday",
+      "requested": null,
+      "effective": "2026-07-30"
+    },
+    {
+      "field": "end",
+      "reason": "defaulted-to-yesterday",
+      "requested": null,
+      "effective": "2026-08-28"
+    }
+  ],
+  "pulledAt": "2026-08-29T12:34:56.000Z",
+  "requestedDataState": "all",
+  "rowAvailability": "Search Console may return only top rows; pagination does not guarantee exhaustive data.",
+  "status": "partial",
+  "firstIncompleteDate": "2026-08-25",
+  "package": {
+    "name": "gsc-snapshot",
+    "version": "0.0.0"
+  },
+  "datasets": {
+    "pageQuery": {
+      "filename": "page-query.json",
+      "rowCount": 3
+    },
+    "devices": {
+      "filename": "devices.json",
+      "rowCount": 2
+    },
+    "countries": {
+      "filename": "countries.json",
+      "rowCount": 2
+    },
+    "totals": {
+      "filename": "totals.json",
+      "rowCount": 1
+    }
+  }
+}

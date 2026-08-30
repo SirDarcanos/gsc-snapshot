@@ -79,6 +79,8 @@ describe("public package contract", () => {
       "package/dist/command.js.map",
       "package/dist/google-runtime.js",
       "package/dist/google-runtime.js.map",
+      "package/dist/snapshot-assembly.js",
+      "package/dist/snapshot-assembly.js.map",
       "package/dist/snapshot.js",
       "package/dist/snapshot.js.map",
       "package/package.json",

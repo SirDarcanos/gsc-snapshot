@@ -1,0 +1,18 @@
+{
+  "rows": [
+    {
+      "device": "DESKTOP",
+      "clicks": 10,
+      "impressions": 100,
+      "ctr": 0.1,
+      "position": 2
+    },
+    {
+      "device": "MOBILE",
+      "clicks": 5,
+      "impressions": 100,
+      "ctr": 0.05,
+      "position": 3
+    }
+  ]
+}
