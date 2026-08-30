@@ -41,7 +41,7 @@ describe("public package contract", () => {
       license: "MIT",
       repository: {
         type: "git",
-        url: "https://github.com/SirDarcanos/gsc-snapshot.git",
+        url: "git+https://github.com/SirDarcanos/gsc-snapshot.git",
       },
       type: "module",
       engines: { node: ">=22" },

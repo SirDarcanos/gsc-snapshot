@@ -23,7 +23,7 @@ describe("user documentation contract", () => {
       "## Partial and final data",
       "firstIncompleteDate",
       "## Security properties",
-      '"gsc-snapshot": "1.0.0"',
+      '"gsc-snapshot": "0.1.0"',
       '"search-console:snapshot"',
     ]) {
       expect(readme).toContain(required);

@@ -14,15 +14,15 @@
 Pin the package as a development dependency in the project whose Search Console data you want to capture:
 
 ```sh
-npm install --save-dev --save-exact gsc-snapshot@1.0.0
+npm install --save-dev --save-exact gsc-snapshot@0.1.0
 ```
 
-Replace `1.0.0` with the release you intend to use. Add a project-local script:
+Replace `0.1.0` with the release you intend to use. Add a project-local script:
 
 ```json
 {
   "devDependencies": {
-    "gsc-snapshot": "1.0.0"
+    "gsc-snapshot": "0.1.0"
   },
   "scripts": {
     "search-console:snapshot": "gsc-snapshot --output reports/search-console"

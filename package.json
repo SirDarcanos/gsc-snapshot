@@ -1,11 +1,11 @@
 {
   "name": "gsc-snapshot",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Create reproducible, read-only Google Search Console snapshots for humans and agents.",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/SirDarcanos/gsc-snapshot.git"
+    "url": "git+https://github.com/SirDarcanos/gsc-snapshot.git"
   },
   "type": "module",
   "exports": {},
